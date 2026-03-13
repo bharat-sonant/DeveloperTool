@@ -3,7 +3,6 @@ import { Database, HardDrive, DollarSign, FolderOpen, MapPin, BarChart3, Loader2
 import StatsCard from '../components/StatsCard'
 import { getDbNodeSize, getDbChildren, getStorageFolderSize, listStorageFolder, isConfigured } from '../lib/firebase'
 import { formatBytes, estimateCost } from '../lib/utils'
-
 const DATA_SECTIONS = [
   { key: 'skipImages',           label: 'Skip Images',              dbPath: 'skipImages',           storagePath: 'skipImages',           icon: '🖼️' },
   { key: 'attendanceData',      label: 'Attendance Data',           dbPath: 'attendance',           storagePath: null,                    icon: '📋' },
@@ -17,7 +16,6 @@ export default function Dashboard() {
   const [error, setError] = useState(null)
   const [stats, setStats] = useState({ totalDbSize: 0, totalStorageSize: 0, totalDbRecords: 0, totalStorageFiles: 0, cities: [] })
   const [sectionStats, setSectionStats] = useState([])
-
   useEffect(() => {
     if (!isConfigured) {
       setLoading(false)

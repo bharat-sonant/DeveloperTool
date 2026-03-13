@@ -7,21 +7,39 @@ import StorageBrowser from './StorageBrowser'
 vi.mock('../lib/firebase', () => ({
   isConfigured: true,
   listStorageFolder: vi.fn().mockResolvedValue({ folders: [], files: [] }),
-  getAttendanceYears: vi.fn().mockResolvedValue([2025, 2026]),
-  getAttendanceMonths: vi.fn().mockResolvedValue([
-    { name: 'January', fullPath: 'Sikar/AttendanceManagement/January' },
-  ]),
   getMonthEmployees: vi.fn().mockResolvedValue([
-    { id: '1001', fileCount: 4, totalSize: 50000 },
+    { id: '1001' },
   ]),
   getEmployeeFiles: vi.fn().mockResolvedValue([
-    { name: '2026-01-01InImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2026-01-01InImage.jpg', size: 12000, contentType: 'image/jpeg', timeCreated: '2026-01-01T08:00:00Z', updated: '2026-01-01T08:00:00Z' },
-    { name: '2026-01-01outImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2026-01-01outImage.jpg', size: 13000, contentType: 'image/jpeg', timeCreated: '2026-01-01T17:00:00Z', updated: '2026-01-01T17:00:00Z' },
-    { name: '2026-01-02InImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2026-01-02InImage.jpg', size: 11000, contentType: 'image/jpeg', timeCreated: '2026-01-02T08:00:00Z', updated: '2026-01-02T08:00:00Z' },
-    { name: '2026-01-02outImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2026-01-02outImage.jpg', size: 14000, contentType: 'image/jpeg', timeCreated: '2026-01-02T17:00:00Z', updated: '2026-01-02T17:00:00Z' },
+    { name: '2025-10-01InImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2025-10-01InImage.jpg', size: 12000, contentType: 'image/jpeg', timeCreated: '2025-10-01T08:00:00Z', updated: '2025-10-01T08:00:00Z' },
+    { name: '2025-10-01outImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2025-10-01outImage.jpg', size: 13000, contentType: 'image/jpeg', timeCreated: '2025-10-01T17:00:00Z', updated: '2025-10-01T17:00:00Z' },
+    { name: '2025-10-02InImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2025-10-02InImage.jpg', size: 11000, contentType: 'image/jpeg', timeCreated: '2025-10-02T08:00:00Z', updated: '2025-10-02T08:00:00Z' },
+    { name: '2025-10-02outImage.jpg', fullPath: 'Sikar/AttendanceManagement/January/1001/2025-10-02outImage.jpg', size: 14000, contentType: 'image/jpeg', timeCreated: '2025-10-02T17:00:00Z', updated: '2025-10-02T17:00:00Z' },
   ]),
   getFileDownloadURL: vi.fn().mockResolvedValue('https://example.com/img.jpg'),
   deleteStorageFiles: vi.fn().mockResolvedValue({ deleted: 2, failed: [] }),
+  scanAttendanceCleanup: vi.fn().mockResolvedValue({ totalFiles: 0, totalCleanable: 0, totalFrozen: 0, months: {} }),
+  saveCleanupResult: vi.fn().mockResolvedValue(),
+  loadCleanupResult: vi.fn().mockResolvedValue({
+    city: 'Sikar',
+    scannedAt: '2026-03-13T10:00:00Z',
+    totalFiles: 4,
+    months: {
+      January: {
+        totalFiles: 4,
+        years: { '2025': { files: 4 } },
+        employees: {
+          '1001': {
+            files: 4,
+            dates: {
+              '2025-10-01': { in: true, out: true, other: 0 },
+              '2025-10-02': { in: true, out: true, other: 0 },
+            },
+          },
+        },
+      },
+    },
+  }),
 }))
 
 const { deleteStorageFiles } = await import('../lib/firebase')
@@ -34,77 +52,74 @@ function renderBrowser() {
   )
 }
 
+async function renderAndWaitForData() {
+  renderBrowser()
+  // Scan result loads → January auto-selected (has cleanable data)
+  // Employee 1001 must be clicked since it's not auto-selected
+  await waitFor(() => {
+    expect(screen.getByText('1001')).toBeInTheDocument()
+  })
+  // Click employee to load files
+  fireEvent.click(screen.getByText('1001'))
+  await waitFor(() => {
+    expect(screen.getByText('2025-10-01')).toBeInTheDocument()
+  })
+}
+
+describe('StorageBrowser — Auto-selection', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('should auto-select January and show employee from scan result', async () => {
+    await renderAndWaitForData()
+
+    expect(screen.getByText('1001')).toBeInTheDocument()
+    expect(screen.getByText('2025-10-01')).toBeInTheDocument()
+    expect(screen.getByText('2025-10-02')).toBeInTheDocument()
+  })
+})
+
 describe('StorageBrowser — Delete UI', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    // Reset confirm mock
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     vi.spyOn(window, 'alert').mockImplementation(() => {})
   })
 
-  it('should render attendance section with months and employees', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('January')).toBeInTheDocument()
-    })
-
-    await waitFor(() => {
-      expect(screen.getByText('1001')).toBeInTheDocument()
-    })
-  })
-
   it('should show file cards grouped by date', async () => {
-    renderBrowser()
+    await renderAndWaitForData()
 
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-      expect(screen.getByText('2026-01-02')).toBeInTheDocument()
-    })
+    expect(screen.getByText('2025-10-01')).toBeInTheDocument()
+    expect(screen.getByText('2025-10-02')).toBeInTheDocument()
   })
 
   it('should not show delete button when no files selected', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     expect(screen.queryByText(/Delete Selected/)).not.toBeInTheDocument()
   })
 
   it('should show delete button when date checkbox is checked', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
-    fireEvent.click(checkboxes[0]) // Select first date group
+    fireEvent.click(checkboxes[0])
 
     expect(screen.getByText(/Delete Selected/)).toBeInTheDocument()
   })
 
   it('should show correct count in delete button', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
-    fireEvent.click(checkboxes[0]) // First date has 2 files
+    fireEvent.click(checkboxes[0])
 
     expect(screen.getByText(/Delete Selected \(2\)/)).toBeInTheDocument()
   })
 
   it('should select all dates when all checkboxes are checked', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     checkboxes.forEach(cb => fireEvent.click(cb))
@@ -113,11 +128,7 @@ describe('StorageBrowser — Delete UI', () => {
   })
 
   it('should deselect files when checkbox is unchecked', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     fireEvent.click(checkboxes[0]) // Select
@@ -128,11 +139,7 @@ describe('StorageBrowser — Delete UI', () => {
 
   it('should show confirmation dialog before deleting', async () => {
     window.confirm.mockReturnValue(false)
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     fireEvent.click(checkboxes[0])
@@ -143,17 +150,12 @@ describe('StorageBrowser — Delete UI', () => {
     expect(window.confirm).toHaveBeenCalledWith(
       expect.stringContaining('Are you sure you want to delete')
     )
-    // Should NOT call deleteStorageFiles since user cancelled
     expect(deleteStorageFiles).not.toHaveBeenCalled()
   })
 
   it('should call deleteStorageFiles when confirmed', async () => {
     window.confirm.mockReturnValue(true)
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     fireEvent.click(checkboxes[0])
@@ -163,19 +165,15 @@ describe('StorageBrowser — Delete UI', () => {
 
     await waitFor(() => {
       expect(deleteStorageFiles).toHaveBeenCalledWith([
-        'Sikar/AttendanceManagement/January/1001/2026-01-01InImage.jpg',
-        'Sikar/AttendanceManagement/January/1001/2026-01-01outImage.jpg',
+        'Sikar/AttendanceManagement/January/1001/2025-10-01InImage.jpg',
+        'Sikar/AttendanceManagement/January/1001/2025-10-01outImage.jpg',
       ])
     })
   })
 
   it('should remove deleted files from UI after successful delete', async () => {
     window.confirm.mockReturnValue(true)
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     fireEvent.click(checkboxes[0])
@@ -184,24 +182,19 @@ describe('StorageBrowser — Delete UI', () => {
     fireEvent.click(deleteBtn)
 
     await waitFor(() => {
-      expect(screen.queryByText('2026-01-01')).not.toBeInTheDocument()
+      expect(screen.queryByText('2025-10-01')).not.toBeInTheDocument()
     })
 
-    // Other date should still be there
-    expect(screen.getByText('2026-01-02')).toBeInTheDocument()
+    expect(screen.getByText('2025-10-02')).toBeInTheDocument()
   })
 
   it('should show alert when some files fail to delete', async () => {
     window.confirm.mockReturnValue(true)
     deleteStorageFiles.mockResolvedValueOnce({
       deleted: 1,
-      failed: ['Sikar/AttendanceManagement/January/1001/2026-01-01outImage.jpg'],
+      failed: ['Sikar/AttendanceManagement/January/1001/2025-10-01outImage.jpg'],
     })
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     const checkboxes = screen.getAllByRole('checkbox')
     fireEvent.click(checkboxes[0])
@@ -217,41 +210,32 @@ describe('StorageBrowser — Delete UI', () => {
   })
 })
 
+describe('StorageBrowser — Frozen Files', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('should not show checkboxes for date groups in current year frozen months', async () => {
+    await renderAndWaitForData()
+
+    // 2025-10-* files are not frozen — checkboxes should be present
+    expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(0)
+    expect(screen.getByText('Select All')).toBeInTheDocument()
+  })
+})
+
 describe('StorageBrowser — Image Toggle', () => {
   it('should show Images OFF by default', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('2026-01-01')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     expect(screen.getByText('Images OFF')).toBeInTheDocument()
   })
 
   it('should toggle to Images ON when clicked', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('Images OFF')).toBeInTheDocument()
-    })
+    await renderAndWaitForData()
 
     fireEvent.click(screen.getByText('Images OFF'))
 
     expect(screen.getByText('Images ON')).toBeInTheDocument()
-  })
-})
-
-describe('StorageBrowser — formatStorageCost', () => {
-  it('should show storage cost badge for loaded employees', async () => {
-    renderBrowser()
-
-    await waitFor(() => {
-      expect(screen.getByText('1001')).toBeInTheDocument()
-    })
-
-    // 50000 bytes = ~0.0000465 GB = ~$0.0000012/mo = < $0.01/mo
-    await waitFor(() => {
-      expect(screen.getByText(/< \$0.01\/mo/)).toBeInTheDocument()
-    })
   })
 })

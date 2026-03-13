@@ -65,22 +65,12 @@ export default function StorageBrowser({ selectedCity }) {
           </div>
         ) : (
           <div>
-            {/* Header */}
-            <div className="flex items-center gap-2.5 pb-4 border-b border-surface-lighter">
-              {activeItem && <activeItem.icon size={20} className="text-primary" />}
-              <h2 className="text-base font-semibold text-text">{activeItem?.label}</h2>
-              <span className="text-xs text-text-muted bg-surface px-2 py-0.5 rounded-full border border-surface-lighter">{selectedCity}</span>
-            </div>
-
-            {/* Section content */}
-            <div className="pt-4">
-              {activeMenu === 'attendance' && (
-                <AttendanceSection selectedCity={selectedCity} />
-              )}
-              {activeMenu !== 'attendance' && activeItem && (
-                <GenericSection selectedCity={selectedCity} storagePath={activeItem.path} />
-              )}
-            </div>
+            {activeMenu === 'attendance' && (
+              <AttendanceSection selectedCity={selectedCity} />
+            )}
+            {activeMenu !== 'attendance' && activeItem && (
+              <GenericSection selectedCity={selectedCity} storagePath={activeItem.path} />
+            )}
           </div>
         )}
       </div>

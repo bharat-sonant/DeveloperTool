@@ -1,6 +1,6 @@
 import { initializeApp } from 'firebase/app'
 import { getDatabase, ref, get, query, orderByKey, limitToFirst } from 'firebase/database'
-import { getStorage, ref as storageRef, listAll, getMetadata, getDownloadURL, deleteObject } from 'firebase/storage'
+import { getStorage, ref as storageRef, listAll, getMetadata, getDownloadURL, deleteObject, uploadString, getBytes } from 'firebase/storage'
 
 const firebaseConfig = {
   apiKey:            import.meta.env.VITE_FIREBASE_API_KEY,
@@ -77,17 +77,26 @@ export async function listStorageFolder(path) {
   }
 }
 
+// Pick a smart sample from an array: first 2, middle 1, last 2 (max 5)
+function smartSample(arr, max = 5) {
+  if (arr.length <= max) return arr
+  const mid = Math.floor(arr.length / 2)
+  const indices = new Set([0, 1, mid, arr.length - 2, arr.length - 1])
+  return [...indices].sort((a, b) => a - b).map(i => arr[i])
+}
+
 export async function getAttendanceYears(cityPath) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement`
   const result = await listAll(storageRef(storage, basePath))
   const years = new Set()
 
-  // Check ALL months, ALL employees — extract years from filenames
+  // Check each month, but only sample ~5 employees per month
   const checks = result.prefixes.map(async (monthPrefix) => {
     try {
       const monthResult = await listAll(storageRef(storage, monthPrefix.fullPath))
-      const empChecks = monthResult.prefixes.map(async (empPrefix) => {
+      const sampled = smartSample(monthResult.prefixes)
+      const empChecks = sampled.map(async (empPrefix) => {
         const files = await listAll(storageRef(storage, empPrefix.fullPath))
         files.items.forEach(f => {
           const match = f.name.match(/^(\d{4})-/)
@@ -115,8 +124,8 @@ export async function getAttendanceMonths(cityPath, year) {
       const monthResult = await listAll(storageRef(storage, monthPrefix.fullPath))
       if (monthResult.prefixes.length === 0) return null
 
-      // Check ALL employees in parallel — filenames start with YYYY-MM-DD
-      const sample = monthResult.prefixes
+      // Sample ~5 employees — filenames start with YYYY-MM-DD
+      const sample = smartSample(monthResult.prefixes)
       const empChecks = sample.map(async (empPrefix) => {
         const files = await listAll(storageRef(storage, empPrefix.fullPath))
         return files.items.some(f => f.name.startsWith(yearStr))
@@ -135,41 +144,33 @@ export async function getAttendanceMonths(cityPath, year) {
   return (await Promise.all(checks)).filter(Boolean)
 }
 
-export async function getMonthEmployees(cityPath, month, year) {
+export async function getMonthEmployees(cityPath, month) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement/${month}`
   const result = await listAll(storageRef(storage, basePath))
-  const yearStr = String(year)
 
-  // Check each employee in parallel — count files + total size matching the year
-  const checks = result.prefixes.map(async (empPrefix) => {
-    try {
-      const files = await listAll(storageRef(storage, empPrefix.fullPath))
-      const yearFiles = files.items.filter(f => f.name.startsWith(yearStr))
-      if (yearFiles.length === 0) return null
-
-      // Get file sizes in parallel
-      const metas = await Promise.all(yearFiles.map(f => getMetadata(f)))
-      const totalSize = metas.reduce((sum, m) => sum + m.size, 0)
-
-      return { id: empPrefix.name, fileCount: yearFiles.length, totalSize }
-    } catch {
-      return null
-    }
-  })
-
-  return (await Promise.all(checks)).filter(Boolean)
+  // Just return employee folder names — no metadata fetching
+  return result.prefixes.map(p => ({ id: p.name }))
 }
 
-export async function getEmployeeFiles(cityPath, month, employeeId, year) {
+export async function checkMonthHasData(cityPath, month) {
+  ensureStorage()
+  const basePath = `${cityPath}/AttendanceManagement/${month}`
+  try {
+    const result = await listAll(storageRef(storage, basePath))
+    return { hasData: result.prefixes.length > 0, employeeCount: result.prefixes.length }
+  } catch {
+    return { hasData: false, employeeCount: 0 }
+  }
+}
+
+export async function getEmployeeFiles(cityPath, month, employeeId) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement/${month}/${employeeId}`
   const result = await listAll(storageRef(storage, basePath))
-  const yearStr = String(year)
-  const yearFiles = result.items.filter(f => f.name.startsWith(yearStr))
 
   // Get metadata for all files in parallel
-  const metas = await Promise.all(yearFiles.map(f => getMetadata(f)))
+  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
   return metas.map(m => ({
     name: m.name,
     fullPath: m.fullPath,
@@ -194,6 +195,105 @@ export async function deleteStorageFiles(fullPaths) {
     .map((r, i) => r.status === 'rejected' ? fullPaths[i] : null)
     .filter(Boolean)
   return { deleted: fullPaths.length - failed.length, failed }
+}
+
+// ── Scan Cleanup ──
+
+export async function scanAttendanceCleanup(cityPath, onProgress) {
+  ensureStorage()
+  const basePath = `${cityPath}/AttendanceManagement`
+  const monthsResult = await listAll(storageRef(storage, basePath))
+  const monthFolders = monthsResult.prefixes.map(p => p.name).sort()
+
+  const now = new Date()
+  const y = now.getFullYear()
+  const m = now.getMonth() + 1
+  const frozenPrefixes = new Set()
+  for (let i = 0; i < 3; i++) {
+    let mo = m - i, yr = y
+    if (mo <= 0) { mo += 12; yr -= 1 }
+    frozenPrefixes.add(`${yr}-${String(mo).padStart(2, '0')}`)
+  }
+
+  const result = {
+    city: cityPath,
+    scannedAt: now.toISOString(),
+    totalFiles: 0,
+    months: {},
+  }
+
+  let scannedMonths = 0
+  for (const month of monthFolders) {
+    if (month === 'cleanupScanResult.json') continue
+    const empResult = await listAll(storageRef(storage, `${basePath}/${month}`))
+    const empFolders = empResult.prefixes
+
+    const monthData = { totalFiles: 0, years: {}, employees: {} }
+
+    for (const empRef of empFolders) {
+      const filesResult = await listAll(storageRef(storage, empRef.fullPath))
+      const empId = empRef.name
+      const empData = { files: 0, dates: {} }
+
+      for (const fileItem of filesResult.items) {
+        const fullMatch = fileItem.name.match(/^(\d{4})-(\d{2})-(\d{2})/)
+        if (!fullMatch) continue
+        const yearMonth = `${fullMatch[1]}-${fullMatch[2]}`
+        // Skip frozen files entirely
+        if (frozenPrefixes.has(yearMonth)) continue
+
+        const dateStr = `${fullMatch[1]}-${fullMatch[2]}-${fullMatch[3]}`
+        const yearStr = fullMatch[1]
+        const type = fileItem.name.includes('InImage') ? 'in' : fileItem.name.includes('outImage') ? 'out' : 'other'
+
+        empData.files++
+
+        // Per-date breakdown
+        if (!empData.dates[dateStr]) empData.dates[dateStr] = { in: false, out: false, other: 0 }
+        if (type === 'in') empData.dates[dateStr].in = true
+        else if (type === 'out') empData.dates[dateStr].out = true
+        else empData.dates[dateStr].other++
+
+        // Per-year aggregation
+        if (!monthData.years[yearStr]) monthData.years[yearStr] = { files: 0 }
+        monthData.years[yearStr].files++
+      }
+
+      if (empData.files > 0) {
+        monthData.employees[empId] = empData
+        monthData.totalFiles += empData.files
+      }
+    }
+
+    if (monthData.totalFiles > 0) {
+      result.months[month] = monthData
+      result.totalFiles += monthData.totalFiles
+    }
+
+    scannedMonths++
+    if (onProgress) onProgress({ scannedMonths, totalMonths: monthFolders.length, currentMonth: month })
+  }
+
+  return result
+}
+
+export async function saveCleanupResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/AttendanceManagement/cleanupScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadCleanupResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/AttendanceManagement/cleanupScanResult.json`)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
 }
 
 export async function getStorageFolderSize(path) {
