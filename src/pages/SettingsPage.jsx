@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Settings, Save, CheckCircle, Database, Key, Plus, X, RotateCcw, MapPin } from 'lucide-react'
-import { getSectionCities, setSectionCities, getDefaultCities } from '../lib/sectionConfig'
+import { Settings, Save, CheckCircle, Database, Key, Plus, X, MapPin } from 'lucide-react'
+import { getSectionCities, setSectionCities } from '../lib/sectionConfig'
 
 export default function SettingsPage() {
   const [config, setConfig] = useState({
@@ -33,13 +33,6 @@ export default function SettingsPage() {
     const updated = dutyOnOffCities.filter(c => c !== city)
     setDutyOnOffCities(updated)
     setSectionCities('dutyOnOff', updated)
-    flashCitySaved()
-  }
-
-  const resetCities = () => {
-    const defaults = getDefaultCities('dutyOnOff')
-    setDutyOnOffCities(defaults)
-    setSectionCities('dutyOnOff', defaults)
     flashCitySaved()
   }
 
@@ -113,13 +106,6 @@ export default function SettingsPage() {
               <CheckCircle size={13} /> Saved
             </span>
           )}
-          <button
-            onClick={resetCities}
-            className="ml-auto flex items-center gap-1.5 text-xs text-text-muted hover:text-primary transition-colors cursor-pointer"
-          >
-            <RotateCcw size={13} />
-            Reset Default
-          </button>
         </div>
 
         {/* Add city */}
@@ -145,7 +131,7 @@ export default function SettingsPage() {
         {/* City list */}
         <div className="flex flex-wrap gap-2">
           {dutyOnOffCities.length === 0 ? (
-            <p className="text-xs text-text-muted">No cities added. Click "Reset Default" to restore.</p>
+            <p className="text-xs text-text-muted">No cities added.</p>
           ) : (
             dutyOnOffCities.map(city => (
               <div

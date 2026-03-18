@@ -33,7 +33,3 @@ export function setSectionCities(section, cities) {
   all[section].cities = [...cities].sort((a, b) => a.localeCompare(b))
   saveAll(all)
 }
-
-export function getDefaultCities(section) {
-  return DEFAULTS[section]?.cities || []
-}
