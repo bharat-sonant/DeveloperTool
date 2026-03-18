@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { Settings, Save, CheckCircle, Database, Key } from 'lucide-react'
+import { Settings, Save, CheckCircle, Database, Key, Plus, X, RotateCcw, MapPin } from 'lucide-react'
+import { getSectionCities, setSectionCities, getDefaultCities } from '../lib/sectionConfig'
 
 export default function SettingsPage() {
   const [config, setConfig] = useState({
@@ -12,6 +13,40 @@ export default function SettingsPage() {
     appId: '',
   })
   const [saved, setSaved] = useState(false)
+
+  // Section city management
+  const [dutyOnOffCities, setDutyOnOffCities] = useState(() => getSectionCities('dutyOnOff'))
+  const [newCity, setNewCity] = useState('')
+  const [citySaved, setCitySaved] = useState(false)
+
+  const addCity = () => {
+    const city = newCity.trim()
+    if (!city || dutyOnOffCities.some(c => c.toLowerCase() === city.toLowerCase())) return
+    const updated = [...dutyOnOffCities, city].sort((a, b) => a.localeCompare(b))
+    setDutyOnOffCities(updated)
+    setSectionCities('dutyOnOff', updated)
+    setNewCity('')
+    flashCitySaved()
+  }
+
+  const removeCity = (city) => {
+    const updated = dutyOnOffCities.filter(c => c !== city)
+    setDutyOnOffCities(updated)
+    setSectionCities('dutyOnOff', updated)
+    flashCitySaved()
+  }
+
+  const resetCities = () => {
+    const defaults = getDefaultCities('dutyOnOff')
+    setDutyOnOffCities(defaults)
+    setSectionCities('dutyOnOff', defaults)
+    flashCitySaved()
+  }
+
+  const flashCitySaved = () => {
+    setCitySaved(true)
+    setTimeout(() => setCitySaved(false), 1500)
+  }
 
   useEffect(() => {
     // Load from env vars (display only, can't be changed at runtime)
@@ -65,6 +100,69 @@ export default function SettingsPage() {
               </div>
             </div>
           ))}
+        </div>
+      </div>
+
+      {/* Duty On/Off Cities */}
+      <div className="bg-surface border border-surface-lighter rounded-2xl p-5">
+        <div className="flex items-center gap-3 mb-4">
+          <MapPin size={18} className="text-rose-500" />
+          <h2 className="text-sm font-semibold text-text">Duty On/Off — Cities</h2>
+          {citySaved && (
+            <span className="ml-2 text-xs text-emerald-500 flex items-center gap-1 animate-pulse">
+              <CheckCircle size={13} /> Saved
+            </span>
+          )}
+          <button
+            onClick={resetCities}
+            className="ml-auto flex items-center gap-1.5 text-xs text-text-muted hover:text-primary transition-colors cursor-pointer"
+          >
+            <RotateCcw size={13} />
+            Reset Default
+          </button>
+        </div>
+
+        {/* Add city */}
+        <div className="flex items-center gap-2 mb-4">
+          <input
+            type="text"
+            value={newCity}
+            onChange={(e) => setNewCity(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && addCity()}
+            placeholder="New city name..."
+            className="flex-1 px-3 py-2 text-sm bg-surface-light border border-surface-lighter rounded-xl text-text placeholder:text-text-muted/50 focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+          />
+          <button
+            onClick={addCity}
+            disabled={!newCity.trim()}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium bg-rose-500 text-white hover:bg-rose-600 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <Plus size={15} />
+            Add
+          </button>
+        </div>
+
+        {/* City list */}
+        <div className="flex flex-wrap gap-2">
+          {dutyOnOffCities.length === 0 ? (
+            <p className="text-xs text-text-muted">No cities added. Click "Reset Default" to restore.</p>
+          ) : (
+            dutyOnOffCities.map(city => (
+              <div
+                key={city}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-rose-500/8 border border-rose-500/20 text-sm text-rose-700 font-medium group"
+              >
+                <MapPin size={12} className="text-rose-400" />
+                {city}
+                <button
+                  onClick={() => removeCity(city)}
+                  className="ml-0.5 p-0.5 rounded hover:bg-rose-500/20 transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                >
+                  <X size={12} className="text-rose-500" />
+                </button>
+              </div>
+            ))
+          )}
         </div>
       </div>
 

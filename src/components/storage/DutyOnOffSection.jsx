@@ -3,8 +3,7 @@ import { Loader2, FileImage, Eye, EyeOff, Search, RefreshCw, Calendar, Trash2, A
 import { getFileDownloadURL, saveDutyOnOffScanResult, loadDutyOnOffScanResult, deleteStorageFiles, listDutyOnOffWards } from '../../lib/firebase'
 import { formatSize } from './utils'
 import CitySelector from '../CitySelector'
-
-const DUTY_CITIES = ['Ajmer', 'Bharatpur', 'Bundi', 'Chennai', 'Chirawa', 'Dausa', 'Dei-Bundi', 'Etmadpur', 'Sikar']
+import { getSectionCities } from '../../lib/sectionConfig'
 
 const SOURCE_LABELS = {
   DutyOnImages: { short: 'On', color: 'bg-emerald-100 text-emerald-700' },
@@ -14,7 +13,22 @@ const SOURCE_LABELS = {
 }
 
 export default function DutyOnOffSection() {
-  const [selectedCity, setSelectedCity] = useState(DUTY_CITIES[0])
+  const [dutyCities, setDutyCities] = useState(() => getSectionCities('dutyOnOff'))
+  const [selectedCity, setSelectedCity] = useState(dutyCities[0])
+
+  // Re-read cities from config on mount & focus (in case Settings changed them)
+  useEffect(() => {
+    const refresh = () => {
+      const fresh = getSectionCities('dutyOnOff')
+      setDutyCities(prev => {
+        if (JSON.stringify(prev) === JSON.stringify(fresh)) return prev
+        return fresh
+      })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [])
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)
   const [scanResult, setScanResult] = useState(null)
@@ -472,7 +486,7 @@ export default function DutyOnOffSection() {
     return (
       <>
       <div className="flex flex-col items-center justify-center h-full gap-4">
-        <CitySelector cities={DUTY_CITIES} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
+        <CitySelector cities={dutyCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         <div className="w-16 h-16 rounded-2xl bg-rose-500/10 flex items-center justify-center">
           <Search size={28} className="text-rose-500" />
         </div>
@@ -580,7 +594,7 @@ export default function DutyOnOffSection() {
             Re Scan
           </button>
           <div className="w-px h-5 bg-surface-lighter" />
-          <CitySelector cities={DUTY_CITIES} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
+          <CitySelector cities={dutyCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         </div>
       </div>
 
