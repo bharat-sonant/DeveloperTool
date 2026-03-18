@@ -1,28 +1,29 @@
 import { useState } from 'react'
 import {
   ClipboardList,
-  LogIn,
-  LogOut,
   SkipForward,
   Megaphone,
   MapPin,
   BookOpen,
+  ArrowLeftRight,
 } from 'lucide-react'
 import AttendanceSection from '../components/storage/AttendanceSection'
+import SkipLineSection from '../components/storage/SkipLineSection'
+import LogBookSection from '../components/storage/LogBookSection'
+import DutyOnOffSection from '../components/storage/DutyOnOffSection'
 import GenericSection from '../components/storage/GenericSection'
 
 const MENU_ITEMS = [
-  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement' },
-  { key: 'dutyOn',    label: 'Duty On',    icon: LogIn,         path: 'DutyOnImages' },
-  { key: 'dutyOff',   label: 'Duty Off',   icon: LogOut,        path: 'DutyOutImages' },
-  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData' },
-  { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData' },
-  { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData' },
-  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages' },
+  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement', disabled: true },
+  { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '' },
+  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData', disabled: true },
+  { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData', disabled: true },
+  { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData', disabled: true },
+  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages', disabled: true },
 ]
 
-export default function StorageBrowser({ selectedCity }) {
-  const [activeMenu, setActiveMenu] = useState('attendance')
+export default function StorageBrowser() {
+  const [activeMenu, setActiveMenu] = useState('dutyOnOff')
   const activeItem = MENU_ITEMS.find(m => m.key === activeMenu)
 
   return (
@@ -32,16 +33,22 @@ export default function StorageBrowser({ selectedCity }) {
         <nav className="flex flex-col items-center gap-0.5 py-3 px-2">
           {MENU_ITEMS.map(item => {
             const isActive = activeMenu === item.key
+            const isDisabled = item.disabled
             return (
               <button
                 key={item.key}
-                onClick={() => setActiveMenu(item.key)}
-                className="flex flex-col items-center gap-1.5 py-2.5 w-full rounded-xl cursor-pointer group"
+                onClick={() => !isDisabled && setActiveMenu(item.key)}
+                disabled={isDisabled}
+                className={`flex flex-col items-center gap-1.5 py-2.5 w-full rounded-xl group ${
+                  isDisabled ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'
+                }`}
               >
                 <div className={`p-2 rounded-[3px] transition-all duration-300 ease-in-out ${
                   isActive
                     ? 'bg-primary text-white shadow-md shadow-primary/25 scale-105'
-                    : 'bg-surface-light border border-surface-lighter text-text-muted group-hover:bg-primary/10 group-hover:border-primary/40 group-hover:text-primary group-hover:scale-110 group-active:scale-95'
+                    : isDisabled
+                      ? 'bg-surface-light border border-surface-lighter text-text-muted'
+                      : 'bg-surface-light border border-surface-lighter text-text-muted group-hover:bg-primary/10 group-hover:border-primary/40 group-hover:text-primary group-hover:scale-110 group-active:scale-95'
                 }`}>
                   <item.icon size={18} strokeWidth={isActive ? 2 : 1.5} />
                 </div>
@@ -57,22 +64,24 @@ export default function StorageBrowser({ selectedCity }) {
       </div>
 
       {/* Content Area */}
-      <div className="flex-1 min-w-0 bg-surface-light p-5 overflow-y-auto">
-        {!selectedCity ? (
-          <div className="flex flex-col items-center justify-center h-full text-text-muted text-sm gap-2">
-            <MapPin size={32} strokeWidth={1} className="text-surface-lighter" />
-            Select a city to view data
-          </div>
-        ) : (
-          <div>
-            {activeMenu === 'attendance' && (
-              <AttendanceSection selectedCity={selectedCity} />
-            )}
-            {activeMenu !== 'attendance' && activeItem && (
-              <GenericSection selectedCity={selectedCity} storagePath={activeItem.path} />
-            )}
-          </div>
-        )}
+      <div className="flex-1 min-w-0 bg-surface-light p-2 overflow-y-auto">
+        <div className="h-full">
+          {activeMenu === 'attendance' && (
+            <AttendanceSection />
+          )}
+          {activeMenu === 'skipLine' && (
+            <SkipLineSection />
+          )}
+          {activeMenu === 'dutyOnOff' && (
+            <DutyOnOffSection />
+          )}
+          {activeMenu === 'logBook' && (
+            <LogBookSection />
+          )}
+          {activeMenu !== 'attendance' && activeMenu !== 'dutyOn' && activeMenu !== 'dutyOff' && activeMenu !== 'dutyOnOff' && activeMenu !== 'skipLine' && activeMenu !== 'logBook' && activeItem && (
+            <GenericSection storagePath={activeItem.path} />
+          )}
+        </div>
       </div>
     </div>
   )

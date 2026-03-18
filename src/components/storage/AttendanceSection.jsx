@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Calendar, FileImage, Eye, EyeOff, Trash2, Search, RefreshCw } from 'lucide-react'
+import { Loader2, Calendar, FileImage, Eye, EyeOff, Trash2, Search, RefreshCw, AlertTriangle, X } from 'lucide-react'
 import { getEmployeeFiles, getFileDownloadURL, deleteStorageFiles, scanAttendanceCleanup, saveCleanupResult, loadCleanupResult } from '../../lib/firebase'
 import { MONTH_ORDER, formatSize } from './utils'
 
@@ -23,6 +23,7 @@ export default function AttendanceSection({ selectedCity }) {
   const [selectedFiles, setSelectedFiles] = useState(new Set())
   const [loadingImages, setLoadingImages] = useState(false)
   const [deleting, setDeleting] = useState(false)
+  const [showRescanModal, setShowRescanModal] = useState(false)
 
 
   // Derived: months from scan result sorted by MONTH_ORDER
@@ -134,11 +135,14 @@ export default function AttendanceSection({ selectedCity }) {
     setScanning(true)
     setScanProgress(null)
     try {
+      console.log(`[Attendance] Starting scan for ${selectedCity}...`)
       const result = await scanAttendanceCleanup(selectedCity, (progress) => {
         setScanProgress(progress)
       })
+      console.log(`[Attendance] Scan complete. ${result.totalFiles} files found. Saving...`)
       setScanResult(result)
       await saveCleanupResult(selectedCity, result)
+      console.log(`[Attendance] Scan result saved to storage`)
       // Auto-select first month with data
       const firstMonth = Object.entries(result.months)
         .sort(([a], [b]) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
@@ -162,7 +166,9 @@ export default function AttendanceSection({ selectedCity }) {
     if (!confirmed) return
     setDeleting(true)
     try {
+      console.log(`[Attendance] Deleting ${selectedFiles.size} files...`)
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
+      console.log(`[Attendance] Delete done. Deleted: ${deleted}, Failed: ${failed.length}`)
       const remainingFiles = empFiles.filter(f => !selectedFiles.has(f.fullPath) || failed.includes(f.fullPath))
       setEmpFiles(remainingFiles)
       setSelectedFiles(new Set(failed))
@@ -202,6 +208,7 @@ export default function AttendanceSection({ selectedCity }) {
           if (monthData.totalFiles <= 0) delete next.months[selectedMonth]
         }
         setScanResult(next)
+        console.log(`[Attendance] Saving updated scan result after delete. New total: ${next.totalFiles}`)
         saveCleanupResult(selectedCity, next).catch(() => {})
       }
 
@@ -240,9 +247,12 @@ export default function AttendanceSection({ selectedCity }) {
     setSelectedYear(null)
     setSelectedEmployee(null)
     setEmpFiles([])
+    console.log(`[Attendance] Loading cached scan result for ${selectedCity}...`)
     loadCleanupResult(selectedCity).then(cached => {
       if (cached) {
+        console.log(`[Attendance] Cached result loaded. Filtering frozen months...`)
         const filtered = filterScanResult(cached)
+        console.log(`[Attendance] After filtering: ${filtered.totalFiles} files, ${Object.keys(filtered.months || {}).length} months`)
         setScanResult(filtered)
         const firstMonth = Object.entries(filtered.months)
           .sort(([a], [b]) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
@@ -265,6 +275,7 @@ export default function AttendanceSection({ selectedCity }) {
     setLoadingFiles(true)
     setImageUrls({})
     setSelectedFiles(new Set())
+    console.log(`[Attendance] Loading files for ${selectedCity}/${selectedMonth}/${selectedEmployee}`)
     getEmployeeFiles(selectedCity, selectedMonth, selectedEmployee)
       .then(files => { if (!cancelled) setEmpFiles(files) })
       .catch(() => { if (!cancelled) setEmpFiles([]) })
@@ -276,6 +287,7 @@ export default function AttendanceSection({ selectedCity }) {
     if (!showImages || empFiles.length === 0) return
     const toFetch = empFiles.filter(f => !imageUrls[f.fullPath])
     if (toFetch.length === 0) return
+    console.log(`[Attendance] Fetching ${toFetch.length} image download URLs...`)
     let cancelled = false
     setLoadingImages(true)
     Promise.all(
@@ -349,12 +361,17 @@ export default function AttendanceSection({ selectedCity }) {
   }
 
   return (
-    <div>
-      <div className="flex flex-col h-full">
+    <>
+    <div className="h-full p-[1px] rounded-xl relative overflow-hidden" style={{
+      background: 'conic-gradient(from var(--border-angle, 0deg), #818cf8, #a78bfa, #f472b6, #818cf8)',
+      animation: 'spin-border 3s linear infinite'
+    }}>
+    <style>{`@keyframes spin-border { to { --border-angle: 360deg; } } @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }`}</style>
+    <div className="flex flex-col h-full rounded-[10px] overflow-hidden bg-white">
         {/* Top bar */}
-        <div className="flex items-center justify-between pb-3 mb-3 border-b border-surface-lighter">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
           <div className="flex items-center gap-3">
-            <h3 className="text-sm font-semibold text-text">{selectedCity} — Files to Delete</h3>
+            <h3 className="text-sm font-semibold text-text">{selectedCity} — Storage Cleanup</h3>
             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-danger/10 text-danger border border-danger/20">
               {scanResult.totalFiles} files to delete
             </span>
@@ -364,7 +381,7 @@ export default function AttendanceSection({ selectedCity }) {
           </div>
           <div className="flex items-center gap-1.5">
             <button
-              onClick={handleScan}
+              onClick={() => setShowRescanModal(true)}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-amber-500/10 text-amber-600 border border-amber-500/20 hover:bg-amber-500/20"
             >
               <RefreshCw size={12} />
@@ -373,32 +390,6 @@ export default function AttendanceSection({ selectedCity }) {
           </div>
         </div>
 
-        {/* Month strip — only months with deletable data */}
-        <div className="flex items-center gap-1.5 pb-3 mb-3 border-b border-surface-lighter overflow-x-auto">
-          {scanMonths.map(month => {
-            const data = scanResult.months[month]
-            const isSelected = selectedMonth === month
-            return (
-              <button
-                key={month}
-                onClick={() => { setSelectedMonth(isSelected ? null : month); setSelectedYear(null); setSelectedEmployee(null); setEmpFiles([]) }}
-                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all shrink-0 cursor-pointer border ${
-                  isSelected
-                    ? 'bg-primary text-white shadow-sm border-primary'
-                    : 'bg-gradient-to-br from-sky-50 to-blue-50 border-sky-200/60 hover:border-sky-300 text-text-muted'
-                }`}
-              >
-                {month}
-                <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${isSelected ? 'bg-white/20 text-white' : 'bg-danger/10 text-danger'}`}>
-                  {data.totalFiles}
-                </span>
-              </button>
-            )
-          })}
-          {scanMonths.length === 0 && (
-            <div className="text-xs text-success font-medium">All clean — no files to delete</div>
-          )}
-        </div>
 
         {/* Year filter + Employee + Files area */}
         {selectedMonth && scanResult.months[selectedMonth] && (
@@ -433,7 +424,7 @@ export default function AttendanceSection({ selectedCity }) {
 
             <div className="flex flex-1 min-h-0">
               {/* Employee list */}
-              <div className="w-32 shrink-0 border-r border-surface-lighter overflow-y-auto">
+              <div className="w-32 shrink-0 border-r border-surface-lighter overflow-y-auto bg-gray-100">
                 {monthEmployees.length === 0 ? (
                   <div className="flex items-center justify-center h-full text-text-muted text-xs">No records</div>
                 ) : (
@@ -446,10 +437,10 @@ export default function AttendanceSection({ selectedCity }) {
                           <button
                             onClick={() => setSelectedEmployee(emp.id)}
                             className={`w-full px-3 py-2 text-left transition-all cursor-pointer ${
-                              isEmpSelected ? 'bg-accent/12 border-r-2 border-accent' : 'hover:bg-surface-light'
+                              isEmpSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
                             }`}
                           >
-                            <div className={`text-[11px] font-semibold ${isEmpSelected ? 'text-accent' : 'text-text'}`}>{emp.id}</div>
+                            <div className={`text-[11px] font-semibold ${isEmpSelected ? 'text-gray-800' : 'text-text'}`}>{emp.id}</div>
                           </button>
                         </div>
                       )
@@ -459,7 +450,86 @@ export default function AttendanceSection({ selectedCity }) {
               </div>
 
               {/* File details */}
-              <div className="flex-1 min-w-0 overflow-y-auto p-4 bg-white">
+              <div className="flex-1 min-w-0 overflow-y-auto bg-white flex flex-col">
+                {/* Month strip at top of content area */}
+                <div className="flex items-center gap-2 flex-wrap px-4 py-2 border-b border-surface-lighter bg-white shrink-0">
+                  {selectedEmployee && (
+                    <>
+                      <span className="text-[10px] font-semibold text-text">Employee {selectedEmployee}</span>
+                      {filteredFiles.length > 0 && (
+                        <span className="text-[9px] text-text-muted">
+                          ({filteredFiles.length} files · {formatSize(filteredFiles.reduce((s, f) => s + f.size, 0))})
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {scanMonths.length > 0 && (
+                    <>
+                      {selectedEmployee && <span className="text-[10px] text-text-muted mx-1">|</span>}
+                      {scanMonths.map(month => {
+                        const data = scanResult.months[month]
+                        const isSelected = selectedMonth === month
+                        return (
+                          <button
+                            key={month}
+                            onClick={() => { setSelectedMonth(isSelected ? null : month); setSelectedYear(null); setSelectedEmployee(null); setEmpFiles([]) }}
+                            className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                              isSelected
+                                ? 'bg-primary text-white shadow-sm'
+                                : 'bg-white text-black border border-primary/20 hover:bg-primary/15'
+                            }`}
+                          >
+                            {month} <span className={`text-[8px] ${isSelected ? 'text-white' : 'text-danger'}`}>{data.totalFiles}</span>
+                          </button>
+                        )
+                      })}
+                    </>
+                  )}
+                  {scanMonths.length === 0 && (
+                    <div className="text-xs text-success font-medium">All clean — no files to delete</div>
+                  )}
+                  <div className="flex items-center gap-1.5 ml-auto">
+                    {selectedFiles.size > 0 && (
+                      <button
+                        onClick={handleDeleteSelected}
+                        disabled={deleting}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20 disabled:opacity-50"
+                      >
+                        {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                        {deleting ? 'Deleting...' : `Delete (${selectedFiles.size})`}
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setShowImages(prev => !prev)}
+                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                        showImages ? 'bg-primary text-white' : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
+                      }`}
+                    >
+                      {showImages ? <Eye size={13} /> : <EyeOff size={13} />}
+                      {showImages ? 'Images ON' : 'Images OFF'}
+                      {loadingImages && <Loader2 size={12} className="animate-spin ml-0.5" />}
+                    </button>
+                    {filteredFiles.length > 0 && (
+                      <button
+                        onClick={() => {
+                          if (selectedFiles.size === filteredFiles.length) {
+                            setSelectedFiles(new Set())
+                          } else {
+                            setSelectedFiles(new Set(filteredFiles.map(f => f.fullPath)))
+                          }
+                        }}
+                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
+                          selectedFiles.size === filteredFiles.length && filteredFiles.length > 0
+                            ? 'bg-primary text-white'
+                            : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
+                        }`}
+                      >
+                        {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? 'Deselect All' : 'Select All'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4">
                 {!selectedEmployee ? (
                   <div className="flex items-center justify-center h-full text-text-muted text-sm">Select an employee</div>
                 ) : loadingFiles ? (
@@ -470,55 +540,6 @@ export default function AttendanceSection({ selectedCity }) {
                   <div className="flex items-center justify-center h-full text-text-muted text-sm">No files found</div>
                 ) : (
                   <div>
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <h3 className="text-sm font-semibold text-text">Employee {selectedEmployee}</h3>
-                        <span className="text-[10px] text-text-muted">
-                          {filteredFiles.length} files · {formatSize(filteredFiles.reduce((s, f) => s + f.size, 0))}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {selectedFiles.size > 0 && (
-                          <button
-                            onClick={handleDeleteSelected}
-                            disabled={deleting}
-                            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20 disabled:opacity-50"
-                          >
-                            {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                            {deleting ? 'Deleting...' : `Delete Selected (${selectedFiles.size})`}
-                          </button>
-                        )}
-                        <button
-                          onClick={() => setShowImages(prev => !prev)}
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                            showImages ? 'bg-primary text-white' : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
-                          }`}
-                        >
-                          {showImages ? <Eye size={13} /> : <EyeOff size={13} />}
-                          {showImages ? 'Images ON' : 'Images OFF'}
-                          {loadingImages && <Loader2 size={12} className="animate-spin ml-0.5" />}
-                        </button>
-                        {filteredFiles.length > 0 && (
-                          <button
-                            onClick={() => {
-                              if (selectedFiles.size === filteredFiles.length) {
-                                setSelectedFiles(new Set())
-                              } else {
-                                setSelectedFiles(new Set(filteredFiles.map(f => f.fullPath)))
-                              }
-                            }}
-                            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                              selectedFiles.size === filteredFiles.length && filteredFiles.length > 0
-                                ? 'bg-primary text-white'
-                                : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
-                            }`}
-                          >
-                            {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? 'Deselect All' : 'Select All'}
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
                     {(() => {
                       const grouped = {}
                       filteredFiles.forEach(file => {
@@ -531,8 +552,8 @@ export default function AttendanceSection({ selectedCity }) {
                       return (
                         <div className="grid grid-cols-5 gap-3">
                           {sortedDates.map(dateKey => (
-                            <div key={dateKey} className="rounded-xl border border-surface-lighter bg-surface-light/30 overflow-hidden">
-                              <div className="flex items-center justify-between px-3 py-2 bg-surface-light/50 border-b border-surface-lighter">
+                            <div key={dateKey} className="rounded-[5px] border border-surface-lighter bg-surface-light/30 overflow-hidden">
+                              <div className="flex items-center justify-between px-3 py-2 bg-gray-100 border-b border-surface-lighter">
                                 <div className="flex items-center gap-1.5">
                                   <input
                                     type="checkbox"
@@ -584,11 +605,77 @@ export default function AttendanceSection({ selectedCity }) {
                     })()}
                   </div>
                 )}
+                </div>
               </div>
             </div>
           </>
         )}
-      </div>
     </div>
+    </div>
+
+    {/* Re-scan Confirmation Modal */}
+    {showRescanModal && (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowRescanModal(false)} />
+        <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
+          <button
+            onClick={() => setShowRescanModal(false)}
+            className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
+          >
+            <X size={18} className="text-gray-400" />
+          </button>
+
+          <div className="flex flex-col items-center text-center gap-4">
+            <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center">
+              <AlertTriangle size={28} className="text-amber-500" />
+            </div>
+
+            <div>
+              <h3 className="text-lg font-bold text-gray-900 mb-2">Re-scan Confirmation</h3>
+              <p className="text-sm text-gray-600 leading-relaxed">
+                Re-scanning is a <span className="font-semibold text-amber-600">time-consuming process</span>.
+                Depending on total files, it can take <span className="font-semibold">several hours</span> to complete.
+              </p>
+            </div>
+
+            <div className="w-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
+              <div className="flex items-start gap-2.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
+                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file in storage, which significantly <span className="font-semibold">increases server costs</span></p>
+              </div>
+              <div className="flex items-start gap-2.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
+                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added or files have changed</p>
+              </div>
+              <div className="flex items-start gap-2.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
+                <p className="text-xs text-amber-800 text-left">Previous scan results will be replaced with fresh data</p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3 w-full pt-2">
+              <button
+                onClick={() => setShowRescanModal(false)}
+                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => { setShowRescanModal(false); handleScan() }}
+                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25"
+              >
+                Continue Scanning
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    )}
+
+    <style>{`
+      @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+      @keyframes slideUp { from { opacity: 0; transform: translateY(20px) scale(0.95); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    `}</style>
+    </>
   )
 }

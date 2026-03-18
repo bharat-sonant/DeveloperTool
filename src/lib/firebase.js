@@ -167,10 +167,16 @@ export async function checkMonthHasData(cityPath, month) {
 export async function getEmployeeFiles(cityPath, month, employeeId) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement/${month}/${employeeId}`
+  console.log(`[Storage:getEmployeeFiles] listAll → ${basePath}`)
   const result = await listAll(storageRef(storage, basePath))
+  console.log(`[Storage:getEmployeeFiles] ${result.items.length} files found, fetching metadata...`)
 
   // Get metadata for all files in parallel
-  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+  const metas = await Promise.all(result.items.map(f => {
+    console.log(`[Storage:getEmployeeFiles] getMetadata → ${f.name}`)
+    return getMetadata(f)
+  }))
+  console.log(`[Storage:getEmployeeFiles] Done. ${metas.length} metadata fetched`)
   return metas.map(m => ({
     name: m.name,
     fullPath: m.fullPath,
@@ -183,17 +189,21 @@ export async function getEmployeeFiles(cityPath, month, employeeId) {
 
 export async function getFileDownloadURL(fullPath) {
   ensureStorage()
+  console.log(`[Storage:getFileDownloadURL] getDownloadURL → ${fullPath}`)
   return getDownloadURL(storageRef(storage, fullPath))
 }
 
 export async function deleteStorageFiles(fullPaths) {
   ensureStorage()
+  console.log(`[Storage:deleteStorageFiles] Deleting ${fullPaths.length} files...`)
+  fullPaths.forEach(p => console.log(`[Storage:deleteStorageFiles] deleteObject → ${p}`))
   const results = await Promise.allSettled(
     fullPaths.map(p => deleteObject(storageRef(storage, p)))
   )
   const failed = results
     .map((r, i) => r.status === 'rejected' ? fullPaths[i] : null)
     .filter(Boolean)
+  console.log(`[Storage:deleteStorageFiles] Done. Deleted: ${fullPaths.length - failed.length}, Failed: ${failed.length}`)
   return { deleted: fullPaths.length - failed.length, failed }
 }
 
@@ -202,8 +212,10 @@ export async function deleteStorageFiles(fullPaths) {
 export async function scanAttendanceCleanup(cityPath, onProgress) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement`
+  console.log(`[Storage:scanAttendance] listAll → ${basePath}`)
   const monthsResult = await listAll(storageRef(storage, basePath))
   const monthFolders = monthsResult.prefixes.map(p => p.name).sort()
+  console.log(`[Storage:scanAttendance] ${monthFolders.length} month folders found:`, monthFolders)
 
   const now = new Date()
   const y = now.getFullYear()
@@ -225,21 +237,24 @@ export async function scanAttendanceCleanup(cityPath, onProgress) {
   let scannedMonths = 0
   for (const month of monthFolders) {
     if (month === 'cleanupScanResult.json') continue
+    console.log(`[Storage:scanAttendance] listAll → ${basePath}/${month}`)
     const empResult = await listAll(storageRef(storage, `${basePath}/${month}`))
     const empFolders = empResult.prefixes
+    console.log(`[Storage:scanAttendance] ${month}: ${empFolders.length} employee folders`)
 
     const monthData = { totalFiles: 0, years: {}, employees: {} }
 
     for (const empRef of empFolders) {
+      console.log(`[Storage:scanAttendance] listAll → ${empRef.fullPath}`)
       const filesResult = await listAll(storageRef(storage, empRef.fullPath))
       const empId = empRef.name
+      console.log(`[Storage:scanAttendance] ${month}/${empId}: ${filesResult.items.length} files`)
       const empData = { files: 0, dates: {} }
 
       for (const fileItem of filesResult.items) {
         const fullMatch = fileItem.name.match(/^(\d{4})-(\d{2})-(\d{2})/)
         if (!fullMatch) continue
         const yearMonth = `${fullMatch[1]}-${fullMatch[2]}`
-        // Skip frozen files entirely
         if (frozenPrefixes.has(yearMonth)) continue
 
         const dateStr = `${fullMatch[1]}-${fullMatch[2]}-${fullMatch[3]}`
@@ -248,13 +263,11 @@ export async function scanAttendanceCleanup(cityPath, onProgress) {
 
         empData.files++
 
-        // Per-date breakdown
         if (!empData.dates[dateStr]) empData.dates[dateStr] = { in: false, out: false, other: 0 }
         if (type === 'in') empData.dates[dateStr].in = true
         else if (type === 'out') empData.dates[dateStr].out = true
         else empData.dates[dateStr].other++
 
-        // Per-year aggregation
         if (!monthData.years[yearStr]) monthData.years[yearStr] = { files: 0 }
         monthData.years[yearStr].files++
       }
@@ -280,20 +293,604 @@ export async function scanAttendanceCleanup(cityPath, onProgress) {
 export async function saveCleanupResult(cityPath, data) {
   ensureStorage()
   const filePath = `${cityPath}/AttendanceManagement/cleanupScanResult.json`
+  console.log(`[Storage:saveCleanupResult] uploadString → ${filePath}`)
   const fileRef = storageRef(storage, filePath)
   await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+  console.log(`[Storage:saveCleanupResult] Saved successfully`)
 }
 
 export async function loadCleanupResult(cityPath) {
   ensureStorage()
+  const path = `${cityPath}/AttendanceManagement/cleanupScanResult.json`
+  console.log(`[Storage:loadCleanupResult] getBytes → ${path}`)
   try {
-    const fileRef = storageRef(storage, `${cityPath}/AttendanceManagement/cleanupScanResult.json`)
+    const fileRef = storageRef(storage, path)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    const data = JSON.parse(text)
+    console.log(`[Storage:loadCleanupResult] Loaded. ${data.totalFiles} total files, ${Object.keys(data.months || {}).length} months`)
+    return data
+  } catch {
+    console.log(`[Storage:loadCleanupResult] No cached result found`)
+    return null
+  }
+}
+
+// ── DutyOn Scan ──
+// Structure: {city}/DutyOnImages/{ward}/{year}/{month}/{date}/{images}
+
+// List top-level folders inside a storage path (for ward/folder picker)
+export async function listStorageFolders(path) {
+  ensureStorage()
+  const result = await listAll(storageRef(storage, path))
+  return result.prefixes.map(p => p.name).filter(n => !n.endsWith('.json')).sort()
+}
+
+export async function scanDutyOnImages(cityPath, onProgress, selectedWards) {
+  ensureStorage()
+  const basePath = `${cityPath}/DutyOnImages`
+  const wardsResult = await listAll(storageRef(storage, basePath))
+  const wardFolders = wardsResult.prefixes.map(p => p.name).sort()
+  const wardsToScan = selectedWards ? wardFolders.filter(w => selectedWards.includes(w)) : wardFolders
+
+  const result = {
+    city: cityPath,
+    scannedAt: new Date().toISOString(),
+    totalFiles: 0,
+    wards: {},
+  }
+
+  let scannedWards = 0
+  for (const ward of wardsToScan) {
+    if (ward === 'dutyOnScanResult.json') continue
+    const wardData = { totalFiles: 0, years: {} }
+
+    const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+    for (const yearRef of yearsResult.prefixes) {
+      const year = yearRef.name
+      const yearData = { totalFiles: 0, months: {} }
+
+      const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+      for (const monthRef of monthsResult.prefixes) {
+        const month = monthRef.name
+        const monthData = { totalFiles: 0, dates: {} }
+
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+        for (const dateRef of datesResult.prefixes) {
+          const date = dateRef.name
+          const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
+          const fileCount = filesResult.items.length
+          if (fileCount > 0) {
+            monthData.dates[date] = { files: fileCount }
+            monthData.totalFiles += fileCount
+          }
+        }
+
+        if (monthData.totalFiles > 0) {
+          yearData.months[month] = monthData
+          yearData.totalFiles += monthData.totalFiles
+        }
+      }
+
+      if (yearData.totalFiles > 0) {
+        wardData.years[year] = yearData
+        wardData.totalFiles += yearData.totalFiles
+      }
+    }
+
+    if (wardData.totalFiles > 0) {
+      result.wards[ward] = wardData
+      result.totalFiles += wardData.totalFiles
+    }
+
+    scannedWards++
+    if (onProgress) onProgress({ scannedWards, totalWards: wardsToScan.length, currentWard: ward })
+  }
+
+  return result
+}
+
+export async function saveDutyOnScanResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/DutyOnImages/dutyOnScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadDutyOnScanResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/DutyOnImages/dutyOnScanResult.json`)
     const bytes = await getBytes(fileRef)
     const text = new TextDecoder().decode(bytes)
     return JSON.parse(text)
   } catch {
     return null
   }
+}
+
+export async function getDutyOnDateFiles(cityPath, ward, year, month, date) {
+  ensureStorage()
+  const basePath = `${cityPath}/DutyOnImages/${ward}/${year}/${month}/${date}`
+  const result = await listAll(storageRef(storage, basePath))
+  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+  return metas.map(m => ({
+    name: m.name,
+    fullPath: m.fullPath,
+    size: m.size,
+    contentType: m.contentType,
+    timeCreated: m.timeCreated,
+    updated: m.updated,
+  }))
+}
+
+// ── DutyOff Scan ──
+// Structure: {city}/DutyOutImages/{ward}/{year}/{month}/{date}/{images}
+
+export async function scanDutyOffImages(cityPath, onProgress, selectedWards) {
+  ensureStorage()
+  const basePath = `${cityPath}/DutyOutImages`
+  const wardsResult = await listAll(storageRef(storage, basePath))
+  const allWards = wardsResult.prefixes.map(p => p.name).sort()
+  const wardFolders = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+
+  const result = {
+    city: cityPath,
+    scannedAt: new Date().toISOString(),
+    totalFiles: 0,
+    wards: {},
+  }
+
+  let scannedWards = 0
+  for (const ward of wardFolders) {
+    if (ward === 'dutyOffScanResult.json') continue
+    const wardData = { totalFiles: 0, years: {} }
+
+    const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+    for (const yearRef of yearsResult.prefixes) {
+      const year = yearRef.name
+      const yearData = { totalFiles: 0, months: {} }
+
+      const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+      for (const monthRef of monthsResult.prefixes) {
+        const month = monthRef.name
+        const monthData = { totalFiles: 0, dates: {} }
+
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+        for (const dateRef of datesResult.prefixes) {
+          const date = dateRef.name
+          const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
+          const fileCount = filesResult.items.length
+          if (fileCount > 0) {
+            monthData.dates[date] = { files: fileCount }
+            monthData.totalFiles += fileCount
+          }
+        }
+
+        if (monthData.totalFiles > 0) {
+          yearData.months[month] = monthData
+          yearData.totalFiles += monthData.totalFiles
+        }
+      }
+
+      if (yearData.totalFiles > 0) {
+        wardData.years[year] = yearData
+        wardData.totalFiles += yearData.totalFiles
+      }
+    }
+
+    if (wardData.totalFiles > 0) {
+      result.wards[ward] = wardData
+      result.totalFiles += wardData.totalFiles
+    }
+
+    scannedWards++
+    if (onProgress) onProgress({ scannedWards, totalWards: wardFolders.length, currentWard: ward })
+  }
+
+  return result
+}
+
+export async function saveDutyOffScanResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/DutyOutImages/dutyOffScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadDutyOffScanResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/DutyOutImages/dutyOffScanResult.json`)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export async function getDutyOffDateFiles(cityPath, ward, year, month, date) {
+  ensureStorage()
+  const basePath = `${cityPath}/DutyOutImages/${ward}/${year}/${month}/${date}`
+  const result = await listAll(storageRef(storage, basePath))
+  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+  return metas.map(m => ({
+    name: m.name,
+    fullPath: m.fullPath,
+    size: m.size,
+    contentType: m.contentType,
+    timeCreated: m.timeCreated,
+    updated: m.updated,
+  }))
+}
+
+// ── SkipLine Scan ──
+// Structure: {city}/SkipData/{ward}/{year}/{month}/{date}/{images}
+
+export async function scanSkipLineImages(cityPath, onProgress, selectedWards) {
+  ensureStorage()
+  const basePath = `${cityPath}/SkipData`
+  const wardsResult = await listAll(storageRef(storage, basePath))
+  const allWards = wardsResult.prefixes.map(p => p.name).sort()
+  const wardFolders = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+
+  const result = {
+    city: cityPath,
+    scannedAt: new Date().toISOString(),
+    totalFiles: 0,
+    wards: {},
+  }
+
+  let scannedWards = 0
+  for (const ward of wardFolders) {
+    if (ward === 'skipLineScanResult.json') continue
+    const wardData = { totalFiles: 0, years: {} }
+
+    const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+    for (const yearRef of yearsResult.prefixes) {
+      const year = yearRef.name
+      const yearData = { totalFiles: 0, months: {} }
+
+      const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+      for (const monthRef of monthsResult.prefixes) {
+        const month = monthRef.name
+        const monthData = { totalFiles: 0, dates: {} }
+
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+        for (const dateRef of datesResult.prefixes) {
+          const date = dateRef.name
+          const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
+          const fileCount = filesResult.items.length
+          if (fileCount > 0) {
+            monthData.dates[date] = { files: fileCount }
+            monthData.totalFiles += fileCount
+          }
+        }
+
+        if (monthData.totalFiles > 0) {
+          yearData.months[month] = monthData
+          yearData.totalFiles += monthData.totalFiles
+        }
+      }
+
+      if (yearData.totalFiles > 0) {
+        wardData.years[year] = yearData
+        wardData.totalFiles += yearData.totalFiles
+      }
+    }
+
+    if (wardData.totalFiles > 0) {
+      result.wards[ward] = wardData
+      result.totalFiles += wardData.totalFiles
+    }
+
+    scannedWards++
+    if (onProgress) onProgress({ scannedWards, totalWards: wardFolders.length, currentWard: ward })
+  }
+
+  return result
+}
+
+export async function saveSkipLineScanResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/SkipData/skipLineScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadSkipLineScanResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/SkipData/skipLineScanResult.json`)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export async function getSkipLineDateFiles(cityPath, ward, year, month, date) {
+  ensureStorage()
+  const basePath = `${cityPath}/SkipData/${ward}/${year}/${month}/${date}`
+  const result = await listAll(storageRef(storage, basePath))
+  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+  return metas.map(m => ({
+    name: m.name,
+    fullPath: m.fullPath,
+    size: m.size,
+    contentType: m.contentType,
+    timeCreated: m.timeCreated,
+    updated: m.updated,
+  }))
+}
+
+// ── LogBook Scan ──
+// Structure: {city}/LogBookImages/{ward}/{year}/{month}/{date}/{images}
+
+export async function scanLogBookImages(cityPath, onProgress, selectedWards) {
+  ensureStorage()
+  const basePath = `${cityPath}/LogBookImages`
+  const wardsResult = await listAll(storageRef(storage, basePath))
+  const allWards = wardsResult.prefixes.map(p => p.name).sort()
+  const wardFolders = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+
+  const result = {
+    city: cityPath,
+    scannedAt: new Date().toISOString(),
+    totalFiles: 0,
+    wards: {},
+  }
+
+  let scannedWards = 0
+  for (const ward of wardFolders) {
+    if (ward === 'logBookScanResult.json') continue
+    const wardData = { totalFiles: 0, years: {} }
+
+    const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+    for (const yearRef of yearsResult.prefixes) {
+      const year = yearRef.name
+      const yearData = { totalFiles: 0, months: {} }
+
+      const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+      for (const monthRef of monthsResult.prefixes) {
+        const month = monthRef.name
+        const monthData = { totalFiles: 0, dates: {} }
+
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+        for (const dateRef of datesResult.prefixes) {
+          const date = dateRef.name
+          const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
+          const fileCount = filesResult.items.length
+          if (fileCount > 0) {
+            monthData.dates[date] = { files: fileCount }
+            monthData.totalFiles += fileCount
+          }
+        }
+
+        if (monthData.totalFiles > 0) {
+          yearData.months[month] = monthData
+          yearData.totalFiles += monthData.totalFiles
+        }
+      }
+
+      if (yearData.totalFiles > 0) {
+        wardData.years[year] = yearData
+        wardData.totalFiles += yearData.totalFiles
+      }
+    }
+
+    if (wardData.totalFiles > 0) {
+      result.wards[ward] = wardData
+      result.totalFiles += wardData.totalFiles
+    }
+
+    scannedWards++
+    if (onProgress) onProgress({ scannedWards, totalWards: wardFolders.length, currentWard: ward })
+  }
+
+  return result
+}
+
+export async function saveLogBookScanResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/LogBookImages/logBookScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadLogBookScanResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/LogBookImages/logBookScanResult.json`)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export async function getLogBookDateFiles(cityPath, ward, year, month, date) {
+  ensureStorage()
+  const basePath = `${cityPath}/LogBookImages/${ward}/${year}/${month}/${date}`
+  const result = await listAll(storageRef(storage, basePath))
+  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+  return metas.map(m => ({
+    name: m.name,
+    fullPath: m.fullPath,
+    size: m.size,
+    contentType: m.contentType,
+    timeCreated: m.timeCreated,
+    updated: m.updated,
+  }))
+}
+
+// ── DutyOnOff Combined Scan ──
+// Scans 4 sources: DutyOnImages, DutyOutImages, DutyOnMeterReadingImages, DutyOutMeterReadingImages
+// All share structure: {city}/{source}/{ward}/{year}/{month}/{date}/{images}
+
+const DUTY_ONOFF_SOURCES = ['DutyOnImages', 'DutyOutImages', 'DutyOnMeterReadingImages', 'DutyOutMeterReadingImages']
+
+// Get union of wards across all 4 duty sources
+export async function listDutyOnOffWards(cityPath) {
+  ensureStorage()
+  const wardSet = new Set()
+  for (const source of DUTY_ONOFF_SOURCES) {
+    try {
+      const result = await listAll(storageRef(storage, `${cityPath}/${source}`))
+      console.log(`[DutyOnOff] ${source}: found ${result.prefixes.length} ward folders`)
+      result.prefixes.forEach(p => {
+        if (!p.name.endsWith('.json')) wardSet.add(p.name)
+      })
+    } catch (err) {
+      console.warn(`[DutyOnOff] Failed to list wards for ${source}:`, err.message)
+    }
+  }
+  console.log(`[DutyOnOff] Total unique wards:`, [...wardSet])
+  return [...wardSet].sort()
+}
+
+export async function scanDutyOnOffImages(cityPath, onProgress, selectedWards) {
+  ensureStorage()
+  const allWards = await listDutyOnOffWards(cityPath)
+  const wardsToScan = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+
+  const result = {
+    city: cityPath,
+    scannedAt: new Date().toISOString(),
+    totalFiles: 0,
+    wards: {},
+  }
+
+  const totalSteps = wardsToScan.length * DUTY_ONOFF_SOURCES.length
+  let completedSteps = 0
+  let apiHits = 0
+
+  for (const ward of wardsToScan) {
+    const wardData = result.wards[ward] || { totalFiles: 0, years: {} }
+
+    for (const source of DUTY_ONOFF_SOURCES) {
+      const basePath = `${cityPath}/${source}/${ward}`
+      console.log(`[DutyOnOff] Scanning: ${basePath}`)
+
+      try {
+        apiHits++
+        const yearsResult = await listAll(storageRef(storage, basePath))
+        console.log(`[DutyOnOff] [Hit #${apiHits}] ${source}/${ward}: ${yearsResult.prefixes.length} years found`)
+
+        for (const yearRef of yearsResult.prefixes) {
+          const year = yearRef.name
+          if (!wardData.years[year]) wardData.years[year] = { totalFiles: 0, months: {} }
+          const yearData = wardData.years[year]
+
+          apiHits++
+          const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+          console.log(`[DutyOnOff] [Hit #${apiHits}] ${source}/${ward}/${year}: ${monthsResult.prefixes.length} months`)
+
+          for (const monthRef of monthsResult.prefixes) {
+            const month = monthRef.name
+            if (!yearData.months[month]) yearData.months[month] = { totalFiles: 0, dates: {} }
+            const monthData = yearData.months[month]
+
+            apiHits++
+            const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+            console.log(`[DutyOnOff] [Hit #${apiHits}] ${source}/${ward}/${year}/${month}: ${datesResult.prefixes.length} dates`)
+
+            // Scan all dates in parallel for speed
+            const datePromises = datesResult.prefixes.map(async (dateRef) => {
+              const date = dateRef.name
+              apiHits++
+              const hitNum = apiHits
+              const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
+              const fileCount = filesResult.items.length
+              console.log(`[DutyOnOff] [Hit #${hitNum}] ${source}/${ward}/${year}/${month}/${date}: ${fileCount} files`)
+              return { date, fileCount }
+            })
+            const dateResults = await Promise.all(datePromises)
+
+            for (const { date, fileCount } of dateResults) {
+              if (fileCount > 0) {
+                if (!monthData.dates[date]) monthData.dates[date] = { files: 0, bySource: {} }
+                monthData.dates[date].files += fileCount
+                monthData.dates[date].bySource[source] = fileCount
+                monthData.totalFiles += fileCount
+                yearData.totalFiles += fileCount
+                wardData.totalFiles += fileCount
+                result.totalFiles += fileCount
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`[DutyOnOff] Error scanning ${source}/${ward}:`, err.message)
+      }
+
+      completedSteps++
+      if (onProgress) onProgress({ completedSteps, totalSteps, currentWard: ward, currentSource: source })
+    }
+
+    if (wardData.totalFiles > 0) {
+      for (const [yr, yd] of Object.entries(wardData.years)) {
+        for (const [mo, md] of Object.entries(yd.months)) {
+          if (md.totalFiles <= 0) delete yd.months[mo]
+        }
+        if (yd.totalFiles <= 0) delete wardData.years[yr]
+      }
+      result.wards[ward] = wardData
+    }
+  }
+
+  console.log(`[DutyOnOff] ✅ Scan complete. Total API hits: ${apiHits}, Total files: ${result.totalFiles}, Wards:`, Object.keys(result.wards))
+  return result
+}
+
+export async function saveDutyOnOffScanResult(cityPath, data) {
+  ensureStorage()
+  const filePath = `${cityPath}/dutyOnOffScanResult.json`
+  const fileRef = storageRef(storage, filePath)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+}
+
+export async function loadDutyOnOffScanResult(cityPath) {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, `${cityPath}/dutyOnOffScanResult.json`)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+export async function getDutyOnOffDateFiles(cityPath, ward, year, month, date) {
+  ensureStorage()
+  const allFiles = []
+  for (const source of DUTY_ONOFF_SOURCES) {
+    const basePath = `${cityPath}/${source}/${ward}/${year}/${month}/${date}`
+    try {
+      const result = await listAll(storageRef(storage, basePath))
+      if (result.items.length === 0) continue
+      console.log(`[DutyOnOff Files] ${source}/${date}: ${result.items.length} files`)
+      const metas = await Promise.all(result.items.map(f => getMetadata(f)))
+      metas.forEach(m => {
+        allFiles.push({
+          name: m.name,
+          fullPath: m.fullPath,
+          size: m.size,
+          contentType: m.contentType,
+          timeCreated: m.timeCreated,
+          updated: m.updated,
+          source,
+        })
+      })
+    } catch (err) {
+      console.warn(`[DutyOnOff Files] Error fetching ${source}/${date}:`, err.message)
+    }
+  }
+  return allFiles
 }
 
 export async function getStorageFolderSize(path) {

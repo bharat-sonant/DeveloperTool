@@ -1,15 +1,14 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Database, HardDrive, DollarSign, Settings } from 'lucide-react'
+import { LayoutDashboard, Database, HardDrive, Settings } from 'lucide-react'
 
 const NAV_ITEMS = [
   { to: '/',           icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/realtime',   icon: Database,        label: 'Realtime DB' },
-  { to: '/storage',    icon: HardDrive,       label: 'Storage' },
-  { to: '/costing',    icon: DollarSign,      label: 'Cost Calculator' },
+  { to: '/storage',    icon: HardDrive,       label: 'Storage Cleanup' },
   { to: '/settings',   icon: Settings,        label: 'Settings' },
 ]
 
-export default function Topbar({ rightSlot }) {
+export default function Topbar() {
   return (
     <header className="fixed top-0 left-0 right-0 h-14 bg-surface/80 backdrop-blur-md border-b border-surface-lighter/60 flex items-center px-4 z-50">
       {/* Logo - left */}
@@ -46,10 +45,8 @@ export default function Topbar({ rightSlot }) {
         </div>
       </nav>
 
-      {/* Right slot */}
-      <div className="shrink-0 pl-4">
-        {rightSlot}
-      </div>
+      {/* Right spacer for balance */}
+      <div className="shrink-0 pl-4" />
     </header>
   )
 }
