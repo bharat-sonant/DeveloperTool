@@ -26,13 +26,18 @@ export default function SettingsPage() {
     let cancelled = false
     ;(async () => {
       setCityLoading(true)
-      const remote = await loadDutyOnOffCities()
-      if (cancelled) return
-      if (remote) {
-        setDutyOnOffCities(remote)
-        cacheSectionCities('dutyOnOff', remote)
+      try {
+        const remote = await loadDutyOnOffCities()
+        if (cancelled) return
+        if (remote) {
+          setDutyOnOffCities(remote)
+          cacheSectionCities('dutyOnOff', remote)
+        }
+      } catch (err) {
+        console.warn('Could not load cities from Firebase:', err.message)
+      } finally {
+        if (!cancelled) setCityLoading(false)
       }
-      setCityLoading(false)
     })()
     return () => { cancelled = true }
   }, [])

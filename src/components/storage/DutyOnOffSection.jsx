@@ -20,14 +20,18 @@ export default function DutyOnOffSection() {
   useEffect(() => {
     let cancelled = false
     const refresh = async () => {
-      const remote = await loadDutyOnOffCities()
-      if (cancelled) return
-      if (remote) {
-        setDutyCities(prev => {
-          if (JSON.stringify(prev) === JSON.stringify(remote)) return prev
-          return remote
-        })
-        cacheSectionCities('dutyOnOff', remote)
+      try {
+        const remote = await loadDutyOnOffCities()
+        if (cancelled) return
+        if (remote) {
+          setDutyCities(prev => {
+            if (JSON.stringify(prev) === JSON.stringify(remote)) return prev
+            return remote
+          })
+          cacheSectionCities('dutyOnOff', remote)
+        }
+      } catch (err) {
+        console.warn('Could not load cities from Firebase:', err.message)
       }
     }
     refresh()
