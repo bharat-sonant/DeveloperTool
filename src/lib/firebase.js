@@ -898,19 +898,14 @@ const CITY_CONFIG_PATH = 'Common/DeveloperTool/DutyOnOffCityData.json'
 
 export async function loadDutyOnOffCities() {
   ensureStorage()
-  console.log('[CityConfig] Loading cities from:', CITY_CONFIG_PATH)
   try {
     const fileRef = storageRef(storage, CITY_CONFIG_PATH)
-    console.log('[CityConfig] Calling getDownloadURL...')
     const url = await getDownloadURL(fileRef)
-    console.log('[CityConfig] Got URL, fetching...')
     const res = await fetch(url)
-    if (!res.ok) { console.log('[CityConfig] Fetch failed:', res.status); return null }
+    if (!res.ok) return null
     const data = await res.json()
-    console.log('[CityConfig] Loaded cities:', data.cities)
     return data.cities || []
-  } catch (err) {
-    console.log('[CityConfig] File not found or error:', err.code || err.message)
+  } catch {
     return null
   }
 }
