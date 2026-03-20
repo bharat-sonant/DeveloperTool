@@ -6,6 +6,7 @@ const CACHE_KEY = 'sectionConfig'
 const DEFAULTS = {
   dutyOnOff: {
     cities: ['Ajmer', 'Bharatpur', 'Bundi', 'Chennai', 'Chirawa', 'Dausa', 'Dei-Bundi', 'Etmadpur', 'Sikar'],
+    cleanedCities: [],
   },
 }
 
@@ -24,16 +25,21 @@ function saveCache(data) {
   localStorage.setItem(CACHE_KEY, JSON.stringify(data))
 }
 
-/** Sync read — returns cached cities or defaults (used for instant UI render) */
-export function getCachedSectionCities(section) {
+/** Sync read — returns cached config or defaults */
+export function getCachedSectionConfig(section) {
   const all = loadCache()
-  return all[section]?.cities || DEFAULTS[section]?.cities || []
+  const def = DEFAULTS[section] || { cities: [], cleanedCities: [] }
+  return {
+    cities: all[section]?.cities || def.cities,
+    cleanedCities: all[section]?.cleanedCities || def.cleanedCities,
+  }
 }
 
-/** Write cities to localStorage cache */
-export function cacheSectionCities(section, cities) {
+/** Write config to localStorage cache */
+export function cacheSectionConfig(section, cities, cleanedCities) {
   const all = loadCache()
   if (!all[section]) all[section] = {}
   all[section].cities = [...cities].sort((a, b) => a.localeCompare(b))
+  all[section].cleanedCities = [...cleanedCities].sort((a, b) => a.localeCompare(b))
   saveCache(all)
 }

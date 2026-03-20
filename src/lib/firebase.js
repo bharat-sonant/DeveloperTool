@@ -896,7 +896,7 @@ export async function getDutyOnOffDateFiles(cityPath, ward, year, month, date) {
 // ── DutyOnOff City Config (stored in Firebase Storage) ──
 const CITY_CONFIG_PATH = 'Common/DeveloperTool/DutyOnOffCityData.json'
 
-export async function loadDutyOnOffCities() {
+export async function loadDutyOnOffCityConfig() {
   ensureStorage()
   try {
     const fileRef = storageRef(storage, CITY_CONFIG_PATH)
@@ -904,18 +904,19 @@ export async function loadDutyOnOffCities() {
     const res = await fetch(url)
     if (!res.ok) return null
     const data = await res.json()
-    return data.cities || []
+    return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
   } catch {
     return null
   }
 }
 
-export async function saveDutyOnOffCities(cities) {
+export async function saveDutyOnOffCityConfig(cities, cleanedCities = []) {
   ensureStorage()
   const sorted = [...cities].sort((a, b) => a.localeCompare(b))
+  const cleanedSorted = [...cleanedCities].sort((a, b) => a.localeCompare(b))
   const fileRef = storageRef(storage, CITY_CONFIG_PATH)
-  await uploadString(fileRef, JSON.stringify({ cities: sorted }), 'raw', { contentType: 'application/json' })
-  return sorted
+  await uploadString(fileRef, JSON.stringify({ cities: sorted, cleanedCities: cleanedSorted }), 'raw', { contentType: 'application/json' })
+  return { cities: sorted, cleanedCities: cleanedSorted }
 }
 
 export async function getStorageFolderSize(path) {

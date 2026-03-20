@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { Loader2, FileImage, Eye, EyeOff, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
-import { getFileDownloadURL, saveDutyOnOffScanResult, loadDutyOnOffScanResult, deleteStorageFiles, listDutyOnOffWards, loadDutyOnOffCities } from '../../lib/firebase'
+import { getFileDownloadURL, saveDutyOnOffScanResult, loadDutyOnOffScanResult, deleteStorageFiles, listDutyOnOffWards, loadDutyOnOffCityConfig } from '../../lib/firebase'
 import { formatSize } from './utils'
 import CitySelector from '../CitySelector'
-import { getCachedSectionCities, cacheSectionCities } from '../../lib/sectionConfig'
+import { getCachedSectionConfig, cacheSectionConfig } from '../../lib/sectionConfig'
 
 const SOURCE_LABELS = {
   DutyOnImages: { short: 'On', color: 'bg-emerald-100 text-emerald-700' },
@@ -13,20 +13,23 @@ const SOURCE_LABELS = {
 }
 
 export default function DutyOnOffSection() {
-  const [dutyCities, setDutyCities] = useState(() => getCachedSectionCities('dutyOnOff'))
-  const [selectedCity, setSelectedCity] = useState(dutyCities[0])
+  const cached = getCachedSectionConfig('dutyOnOff')
+  const activeCities = cached.cities.filter(c => !cached.cleanedCities.includes(c))
+  const [dutyCities, setDutyCities] = useState(activeCities)
+  const [selectedCity, setSelectedCity] = useState(activeCities[0])
 
-  // Load cities from Firebase on mount & focus
+  // Load cities from Firebase on mount & focus, filter out cleaned
   useEffect(() => {
     const refresh = async () => {
       try {
-        const remote = await loadDutyOnOffCities()
+        const remote = await loadDutyOnOffCityConfig()
         if (remote) {
+          const active = remote.cities.filter(c => !remote.cleanedCities.includes(c))
           setDutyCities(prev => {
-            if (JSON.stringify(prev) === JSON.stringify(remote)) return prev
-            return remote
+            if (JSON.stringify(prev) === JSON.stringify(active)) return prev
+            return active
           })
-          cacheSectionCities('dutyOnOff', remote)
+          cacheSectionConfig('dutyOnOff', remote.cities, remote.cleanedCities)
         }
       } catch (err) {
         console.warn('Could not load cities from Firebase:', err.message)

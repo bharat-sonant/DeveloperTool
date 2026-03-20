@@ -17,7 +17,7 @@ function AppLayout() {
             </div>
           } />
           <Route path="*" element={
-            <div className="max-w-6xl mx-auto p-6 lg:p-8">
+            <div className="max-w-6xl p-6 lg:p-8">
               <Routes>
                 <Route path="/" element={<Dashboard />} />
                 <Route path="/realtime" element={<RealtimeDB />} />
