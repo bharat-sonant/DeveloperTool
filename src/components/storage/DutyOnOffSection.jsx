@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { Loader2, FileImage, Eye, EyeOff, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
-import { getFileDownloadURL, saveDutyOnOffScanResult, loadDutyOnOffScanResult, deleteStorageFiles, listDutyOnOffWards } from '../../lib/firebase'
+import { getFileDownloadURL, saveDutyOnOffScanResult, loadDutyOnOffScanResult, deleteStorageFiles, listDutyOnOffWards, loadDutyOnOffCities } from '../../lib/firebase'
 import { formatSize } from './utils'
 import CitySelector from '../CitySelector'
-import { getSectionCities } from '../../lib/sectionConfig'
+import { getCachedSectionCities, cacheSectionCities } from '../../lib/sectionConfig'
 
 const SOURCE_LABELS = {
   DutyOnImages: { short: 'On', color: 'bg-emerald-100 text-emerald-700' },
@@ -13,21 +13,26 @@ const SOURCE_LABELS = {
 }
 
 export default function DutyOnOffSection() {
-  const [dutyCities, setDutyCities] = useState(() => getSectionCities('dutyOnOff'))
+  const [dutyCities, setDutyCities] = useState(() => getCachedSectionCities('dutyOnOff'))
   const [selectedCity, setSelectedCity] = useState(dutyCities[0])
 
-  // Re-read cities from config on mount & focus (in case Settings changed them)
+  // Load cities from Firebase on mount & focus
   useEffect(() => {
-    const refresh = () => {
-      const fresh = getSectionCities('dutyOnOff')
-      setDutyCities(prev => {
-        if (JSON.stringify(prev) === JSON.stringify(fresh)) return prev
-        return fresh
-      })
+    let cancelled = false
+    const refresh = async () => {
+      const remote = await loadDutyOnOffCities()
+      if (cancelled) return
+      if (remote) {
+        setDutyCities(prev => {
+          if (JSON.stringify(prev) === JSON.stringify(remote)) return prev
+          return remote
+        })
+        cacheSectionCities('dutyOnOff', remote)
+      }
     }
     refresh()
     window.addEventListener('focus', refresh)
-    return () => window.removeEventListener('focus', refresh)
+    return () => { cancelled = true; window.removeEventListener('focus', refresh) }
   }, [])
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)

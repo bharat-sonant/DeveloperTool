@@ -1,7 +1,7 @@
-// Persistent section config stored in localStorage
-// Each section (e.g. 'dutyOnOff') can have its own city list
+// Persistent section config — Firebase Storage is the source of truth,
+// localStorage is used as a fast cache / offline fallback.
 
-const STORAGE_KEY = 'sectionConfig'
+const CACHE_KEY = 'sectionConfig'
 
 const DEFAULTS = {
   dutyOnOff: {
@@ -9,27 +9,31 @@ const DEFAULTS = {
   },
 }
 
-function loadAll() {
+// ── Cache helpers (localStorage) ──
+
+function loadCache() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY)
+    const raw = localStorage.getItem(CACHE_KEY)
     return raw ? JSON.parse(raw) : {}
   } catch {
     return {}
   }
 }
 
-function saveAll(data) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
+function saveCache(data) {
+  localStorage.setItem(CACHE_KEY, JSON.stringify(data))
 }
 
-export function getSectionCities(section) {
-  const all = loadAll()
+/** Sync read — returns cached cities or defaults (used for instant UI render) */
+export function getCachedSectionCities(section) {
+  const all = loadCache()
   return all[section]?.cities || DEFAULTS[section]?.cities || []
 }
 
-export function setSectionCities(section, cities) {
-  const all = loadAll()
+/** Write cities to localStorage cache */
+export function cacheSectionCities(section, cities) {
+  const all = loadCache()
   if (!all[section]) all[section] = {}
   all[section].cities = [...cities].sort((a, b) => a.localeCompare(b))
-  saveAll(all)
+  saveCache(all)
 }

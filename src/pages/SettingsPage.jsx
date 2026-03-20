@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
-import { Settings, Save, CheckCircle, Database, Key, Plus, X, MapPin } from 'lucide-react'
-import { getSectionCities, setSectionCities } from '../lib/sectionConfig'
+import { Settings, Save, CheckCircle, Database, Key, Plus, X, MapPin, Loader2 } from 'lucide-react'
+import { getCachedSectionCities, cacheSectionCities } from '../lib/sectionConfig'
+import { loadDutyOnOffCities, saveDutyOnOffCities } from '../lib/firebase'
 
 export default function SettingsPage() {
   const [config, setConfig] = useState({
@@ -12,28 +13,63 @@ export default function SettingsPage() {
     messagingSenderId: '',
     appId: '',
   })
-  const [saved, setSaved] = useState(false)
 
   // Section city management
-  const [dutyOnOffCities, setDutyOnOffCities] = useState(() => getSectionCities('dutyOnOff'))
+  const [dutyOnOffCities, setDutyOnOffCities] = useState(() => getCachedSectionCities('dutyOnOff'))
   const [newCity, setNewCity] = useState('')
   const [citySaved, setCitySaved] = useState(false)
+  const [cityLoading, setCityLoading] = useState(true)
+  const [citySaving, setCitySaving] = useState(false)
 
-  const addCity = () => {
+  // Load cities from Firebase on mount
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      setCityLoading(true)
+      const remote = await loadDutyOnOffCities()
+      if (cancelled) return
+      if (remote) {
+        setDutyOnOffCities(remote)
+        cacheSectionCities('dutyOnOff', remote)
+      }
+      setCityLoading(false)
+    })()
+    return () => { cancelled = true }
+  }, [])
+
+  const addCity = async () => {
     const city = newCity.trim()
     if (!city || dutyOnOffCities.some(c => c.toLowerCase() === city.toLowerCase())) return
     const updated = [...dutyOnOffCities, city].sort((a, b) => a.localeCompare(b))
     setDutyOnOffCities(updated)
-    setSectionCities('dutyOnOff', updated)
     setNewCity('')
-    flashCitySaved()
+    setCitySaving(true)
+    try {
+      const sorted = await saveDutyOnOffCities(updated)
+      setDutyOnOffCities(sorted)
+      cacheSectionCities('dutyOnOff', sorted)
+      flashCitySaved()
+    } catch (err) {
+      console.error('Failed to save cities:', err)
+    } finally {
+      setCitySaving(false)
+    }
   }
 
-  const removeCity = (city) => {
+  const removeCity = async (city) => {
     const updated = dutyOnOffCities.filter(c => c !== city)
     setDutyOnOffCities(updated)
-    setSectionCities('dutyOnOff', updated)
-    flashCitySaved()
+    setCitySaving(true)
+    try {
+      const sorted = await saveDutyOnOffCities(updated)
+      setDutyOnOffCities(sorted)
+      cacheSectionCities('dutyOnOff', sorted)
+      flashCitySaved()
+    } catch (err) {
+      console.error('Failed to save cities:', err)
+    } finally {
+      setCitySaving(false)
+    }
   }
 
   const flashCitySaved = () => {
@@ -42,7 +78,6 @@ export default function SettingsPage() {
   }
 
   useEffect(() => {
-    // Load from env vars (display only, can't be changed at runtime)
     setConfig({
       apiKey:            import.meta.env.VITE_FIREBASE_API_KEY || '',
       authDomain:        import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || '',
@@ -101,6 +136,7 @@ export default function SettingsPage() {
         <div className="flex items-center gap-3 mb-4">
           <MapPin size={18} className="text-rose-500" />
           <h2 className="text-sm font-semibold text-text">Duty On/Off — Cities</h2>
+          {citySaving && <Loader2 size={14} className="ml-2 text-text-muted animate-spin" />}
           {citySaved && (
             <span className="ml-2 text-xs text-emerald-500 flex items-center gap-1 animate-pulse">
               <CheckCircle size={13} /> Saved
@@ -116,11 +152,12 @@ export default function SettingsPage() {
             onChange={(e) => setNewCity(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && addCity()}
             placeholder="New city name..."
-            className="flex-1 px-3 py-2 text-sm bg-surface-light border border-surface-lighter rounded-xl text-text placeholder:text-text-muted/50 focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20"
+            disabled={citySaving}
+            className="flex-1 px-3 py-2 text-sm bg-surface-light border border-surface-lighter rounded-xl text-text placeholder:text-text-muted/50 focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20 disabled:opacity-50"
           />
           <button
             onClick={addCity}
-            disabled={!newCity.trim()}
+            disabled={!newCity.trim() || citySaving}
             className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium bg-rose-500 text-white hover:bg-rose-600 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Plus size={15} />
@@ -130,7 +167,11 @@ export default function SettingsPage() {
 
         {/* City list */}
         <div className="flex flex-wrap gap-2">
-          {dutyOnOffCities.length === 0 ? (
+          {cityLoading ? (
+            <div className="flex items-center gap-2 text-xs text-text-muted">
+              <Loader2 size={14} className="animate-spin" /> Loading cities...
+            </div>
+          ) : dutyOnOffCities.length === 0 ? (
             <p className="text-xs text-text-muted">No cities added.</p>
           ) : (
             dutyOnOffCities.map(city => (
@@ -142,7 +183,8 @@ export default function SettingsPage() {
                 {city}
                 <button
                   onClick={() => removeCity(city)}
-                  className="ml-0.5 p-0.5 rounded hover:bg-rose-500/20 transition-colors cursor-pointer opacity-0 group-hover:opacity-100"
+                  disabled={citySaving}
+                  className="ml-0.5 p-0.5 rounded hover:bg-rose-500/20 transition-colors cursor-pointer opacity-0 group-hover:opacity-100 disabled:opacity-0"
                 >
                   <X size={12} className="text-rose-500" />
                 </button>

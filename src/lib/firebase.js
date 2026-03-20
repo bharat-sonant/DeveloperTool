@@ -893,6 +893,30 @@ export async function getDutyOnOffDateFiles(cityPath, ward, year, month, date) {
   return allFiles
 }
 
+// ── DutyOnOff City Config (stored in Firebase Storage) ──
+const CITY_CONFIG_PATH = 'common/DeveloperTool/DutyOnOffCityData.json'
+
+export async function loadDutyOnOffCities() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, CITY_CONFIG_PATH)
+    const bytes = await getBytes(fileRef)
+    const text = new TextDecoder().decode(bytes)
+    const data = JSON.parse(text)
+    return data.cities || []
+  } catch {
+    return null
+  }
+}
+
+export async function saveDutyOnOffCities(cities) {
+  ensureStorage()
+  const sorted = [...cities].sort((a, b) => a.localeCompare(b))
+  const fileRef = storageRef(storage, CITY_CONFIG_PATH)
+  await uploadString(fileRef, JSON.stringify({ cities: sorted }), 'raw', { contentType: 'application/json' })
+  return sorted
+}
+
 export async function getStorageFolderSize(path) {
   ensureStorage()
   const folderRef = storageRef(storage, path)
