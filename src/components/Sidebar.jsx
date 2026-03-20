@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Database, HardDrive, Settings } from 'lucide-react'
+import { LayoutDashboard, Database, HardDrive, Settings, Sparkles } from 'lucide-react'
 
 const NAV_ITEMS = [
   { to: '/',           icon: LayoutDashboard, label: 'Dashboard' },
@@ -10,43 +10,44 @@ const NAV_ITEMS = [
 
 export default function Topbar() {
   return (
-    <header className="fixed top-0 left-0 right-0 h-14 bg-surface/80 backdrop-blur-md border-b border-surface-lighter/60 flex items-center px-4 z-50">
-      {/* Logo - left */}
-      <div className="flex items-center gap-2 shrink-0 pr-6 border-r border-surface-lighter/60 mr-4">
-        <div className="w-7 h-7 rounded-md bg-gradient-to-br from-emerald-500 to-green-600 flex items-center justify-center shrink-0 shadow-sm">
-          <span className="text-white text-[11px] font-bold">W</span>
+    <header className="fixed top-0 left-0 right-0 h-14 bg-white/70 backdrop-blur-xl border-b border-surface-lighter/50 flex items-center px-5 z-50">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5 shrink-0 pr-6 border-r border-surface-lighter/50 mr-5">
+        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-sky-500 to-cyan-400 flex items-center justify-center shadow-md shadow-sky-500/20">
+          <Sparkles size={16} className="text-white" strokeWidth={2.5} />
         </div>
         <div className="leading-none">
-          <h1 className="text-[13px] font-bold text-text tracking-tight">
-            We<span className="text-emerald-500">VOIS</span>
+          <h1 className="text-[13px] font-extrabold text-text tracking-tight">
+            Data<span className="text-primary">Cleaner</span>
           </h1>
-          <p className="text-[9px] text-text-muted tracking-wide uppercase">Developer Tool</p>
+          <p className="text-[8px] text-text-muted tracking-widest uppercase font-medium">WeVOIS Tool</p>
         </div>
       </div>
 
-      {/* Navigation - center */}
+      {/* Navigation */}
       <nav className="flex-1 flex items-center justify-center">
-        <div className="flex items-center gap-0.5 bg-surface-light/60 rounded-lg p-0.5">
+        <div className="flex items-center gap-1 bg-surface-light/80 rounded-xl p-1 border border-surface-lighter/50">
           {NAV_ITEMS.map(({ to, icon: Icon, label }) => (
             <NavLink
               key={to}
               to={to}
+              end={to === '/'}
               className={({ isActive }) =>
-                `flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[11px] font-medium transition-all duration-200
+                `flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[11px] font-semibold transition-all duration-200
                  ${isActive
-                   ? 'bg-surface text-primary shadow-sm'
-                   : 'text-text-muted hover:text-text'}`
+                   ? 'bg-white text-primary shadow-sm border border-surface-lighter/60'
+                   : 'text-text-muted hover:text-text hover:bg-white/50'}`
               }
             >
-              <Icon size={14} strokeWidth={1.5} />
+              <Icon size={14} strokeWidth={2} />
               <span>{label}</span>
             </NavLink>
           ))}
         </div>
       </nav>
 
-      {/* Right spacer for balance */}
-      <div className="shrink-0 pl-4" />
+      {/* Right spacer */}
+      <div className="shrink-0 w-[140px]" />
     </header>
   )
 }

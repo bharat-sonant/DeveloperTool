@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
-import { CheckCircle, Plus, X, Loader2, Check, MapPin } from 'lucide-react'
+import { CheckCircle, Plus, X, Loader2, Check, MapPin, ArrowLeftRight } from 'lucide-react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { getCachedSectionConfig, cacheSectionConfig } from '../lib/sectionConfig'
 import { loadDutyOnOffCityConfig, saveDutyOnOffCityConfig } from '../lib/firebase'
 
@@ -81,55 +82,81 @@ export default function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="bg-surface border border-surface-lighter rounded-2xl overflow-hidden">
+      <motion.div
+        initial={{ opacity: 0, y: 12 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.35 }}
+        className="bg-white border border-surface-lighter rounded-2xl overflow-hidden shadow-sm max-w-3xl"
+      >
 
         {/* Header */}
-        <div className="px-5 py-4 border-b border-surface-lighter">
+        <div className="px-5 py-4 bg-gradient-to-r from-sky-50/80 to-transparent border-b border-surface-lighter/70">
           <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-rose-500/10 flex items-center justify-center">
-              <MapPin size={18} className="text-rose-500" />
+            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-sky-500 to-cyan-400 flex items-center justify-center shadow-md shadow-sky-500/20">
+              <ArrowLeftRight size={18} className="text-white" strokeWidth={2.5} />
             </div>
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <h2 className="text-sm font-bold text-text">Duty On/Off — Cities</h2>
+                <h2 className="text-sm font-extrabold text-text">Duty On/Off — Cities</h2>
                 {citySaving && <Loader2 size={13} className="text-text-muted animate-spin" />}
-                {citySaved && (
-                  <span className="text-[11px] text-emerald-500 flex items-center gap-1 animate-pulse">
-                    <CheckCircle size={12} /> Saved
-                  </span>
-                )}
+                <AnimatePresence>
+                  {citySaved && (
+                    <motion.span
+                      initial={{ opacity: 0, x: -8 }}
+                      animate={{ opacity: 1, x: 0 }}
+                      exit={{ opacity: 0, x: 8 }}
+                      className="text-[11px] text-emerald-500 flex items-center gap-1 font-semibold"
+                    >
+                      <CheckCircle size={12} /> Saved
+                    </motion.span>
+                  )}
+                </AnimatePresence>
               </div>
               {!cityLoading && dutyOnOffCities.length > 0 && (
-                <div className="flex items-center gap-3 mt-1">
-                  <div className="flex-1 h-1.5 bg-surface-lighter rounded-full overflow-hidden max-w-[180px]">
-                    <div className="h-full bg-emerald-500 rounded-full transition-all duration-500" style={{ width: `${progress}%` }} />
+                <div className="flex items-center gap-3 mt-1.5">
+                  <div className="flex-1 h-1.5 bg-surface-lighter rounded-full overflow-hidden max-w-[200px]">
+                    <motion.div
+                      className="h-full bg-gradient-to-r from-emerald-400 to-emerald-500 rounded-full"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${progress}%` }}
+                      transition={{ duration: 0.6, ease: 'easeOut' }}
+                    />
                   </div>
-                  <span className="text-[11px] text-text-muted">
-                    <strong className="text-emerald-500">{doneCities.length}</strong> / {dutyOnOffCities.length} done
-                  </span>
+                  <div className="flex items-center gap-2.5 text-[11px]">
+                    <span className="text-emerald-600 font-bold">{doneCities.length} done</span>
+                    <span className="w-px h-3 bg-surface-lighter" />
+                    <span className="text-amber-500 font-semibold">{pendingCities.length} pending</span>
+                    <span className="w-px h-3 bg-surface-lighter" />
+                    <span className="text-text-muted">{dutyOnOffCities.length} total</span>
+                  </div>
                 </div>
               )}
             </div>
 
             {/* Add city */}
             <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={newCity}
-                onChange={(e) => setNewCity(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && addCity()}
-                placeholder="Add city..."
-                disabled={citySaving}
-                className="w-36 px-3 py-1.5 text-xs bg-surface-light border border-surface-lighter rounded-lg text-text placeholder:text-text-muted/50 focus:outline-none focus:border-primary/50 focus:ring-1 focus:ring-primary/20 disabled:opacity-50"
-              />
-              <button
+              <div className="relative">
+                <MapPin size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted/40" />
+                <input
+                  type="text"
+                  value={newCity}
+                  onChange={(e) => setNewCity(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && addCity()}
+                  placeholder="Add city..."
+                  disabled={citySaving}
+                  className="w-36 pl-7 pr-3 py-1.5 text-xs bg-white border border-surface-lighter rounded-lg text-text placeholder:text-text-muted/40 focus:outline-none focus:border-sky-300 focus:ring-2 focus:ring-sky-500/10 disabled:opacity-50 transition-all"
+                />
+              </div>
+              <motion.button
+                whileHover={{ scale: 1.04 }}
+                whileTap={{ scale: 0.96 }}
                 onClick={addCity}
                 disabled={!newCity.trim() || citySaving}
-                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-rose-500 text-white hover:bg-rose-600 transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-gradient-to-r from-sky-500 to-cyan-400 text-white shadow-sm shadow-sky-500/20 hover:shadow-md hover:shadow-sky-500/25 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed disabled:shadow-none"
               >
-                <Plus size={13} />
+                <Plus size={13} strokeWidth={2.5} />
                 Add
-              </button>
+              </motion.button>
             </div>
           </div>
         </div>
@@ -137,65 +164,103 @@ export default function SettingsPage() {
         {/* City Cards */}
         <div className="p-5">
           {cityLoading ? (
-            <div className="flex items-center gap-2 text-xs text-text-muted py-8 justify-center">
-              <Loader2 size={14} className="animate-spin" /> Loading cities...
-            </div>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="flex flex-col items-center gap-2 py-12"
+            >
+              <Loader2 size={20} className="text-primary animate-spin" />
+              <p className="text-xs text-text-muted">Loading cities...</p>
+            </motion.div>
           ) : dutyOnOffCities.length === 0 ? (
-            <div className="text-center py-8">
-              <MapPin size={24} className="text-text-muted/30 mx-auto mb-2" />
-              <p className="text-xs text-text-muted">No cities added yet.</p>
-            </div>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="text-center py-12"
+            >
+              <div className="w-14 h-14 rounded-2xl bg-surface-light flex items-center justify-center mx-auto mb-3">
+                <MapPin size={24} className="text-text-muted/30" />
+              </div>
+              <p className="text-sm font-medium text-text-muted">No cities added yet</p>
+              <p className="text-[11px] text-text-muted/60 mt-0.5">Use the input above to add a city</p>
+            </motion.div>
           ) : (
-            <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-3">
-              {dutyOnOffCities.map(city => {
-                const isCleaned = cleanedCities.includes(city)
-                return (
-                  <div
-                    key={city}
-                    className={`group relative flex items-center gap-2.5 px-3.5 py-3 rounded-xl border transition-all hover:shadow-sm ${
-                      isCleaned
-                        ? 'bg-emerald-50 border-emerald-200'
-                        : 'bg-white border-surface-lighter hover:border-surface-lighter/80'
-                    }`}
-                  >
-                    {/* Remove button */}
-                    <button
-                      onClick={() => removeCity(city)}
-                      disabled={citySaving}
-                      className="absolute top-1.5 right-1.5 p-0.5 rounded-md hover:bg-red-500/15 transition-all cursor-pointer disabled:opacity-40 opacity-0 group-hover:opacity-100"
+            <motion.div layout className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-5 gap-2.5">
+              <AnimatePresence mode="popLayout">
+                {dutyOnOffCities.map((city, i) => {
+                  const isCleaned = cleanedCities.includes(city)
+                  return (
+                    <motion.div
+                      key={city}
+                      layout
+                      initial={{ opacity: 0, scale: 0.85 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      exit={{ opacity: 0, scale: 0.85, transition: { duration: 0.15 } }}
+                      transition={{ duration: 0.25, delay: i * 0.02 }}
+                      whileHover={{ y: -2, transition: { duration: 0.15 } }}
+                      className={`group relative flex items-center gap-2 px-3 py-2.5 rounded-xl border cursor-default transition-colors ${
+                        isCleaned
+                          ? 'bg-emerald-50/80 border-emerald-200/70'
+                          : 'bg-surface-light/50 border-surface-lighter/80 hover:bg-white hover:border-surface-lighter'
+                      }`}
                     >
-                      <X size={11} className="text-red-400" />
-                    </button>
-
-                    {/* City name + toggle */}
-                    <span className={`text-[10px] font-semibold leading-tight flex-1 ${
-                      isCleaned ? 'text-emerald-700' : 'text-text'
-                    }`}>
-                      {city}
-                    </span>
-
-                    <button
-                      onClick={() => toggleCleaned(city)}
-                      disabled={citySaving}
-                      className="relative w-7 h-[16px] rounded-full transition-all duration-300 cursor-pointer disabled:opacity-40 focus:outline-none shrink-0"
-                      style={{ backgroundColor: isCleaned ? '#10b981' : '#d1d5db' }}
-                    >
-                      <span
-                        className={`absolute top-[2px] w-3 h-3 rounded-full bg-white shadow-sm transition-all duration-300 flex items-center justify-center ${
-                          isCleaned ? 'left-[12px]' : 'left-[2px]'
-                        }`}
+                      {/* Remove button */}
+                      <motion.button
+                        whileHover={{ scale: 1.2 }}
+                        whileTap={{ scale: 0.85 }}
+                        onClick={() => removeCity(city)}
+                        disabled={citySaving}
+                        className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-white border border-red-200 flex items-center justify-center shadow-sm cursor-pointer disabled:opacity-40 opacity-0 group-hover:opacity-100 transition-opacity"
                       >
-                        {isCleaned && <Check size={6} className="text-emerald-500" strokeWidth={3} />}
+                        <X size={8} className="text-red-400" strokeWidth={3} />
+                      </motion.button>
+
+                      {/* City name */}
+                      <span className={`text-[11px] font-semibold leading-tight flex-1 truncate ${
+                        isCleaned ? 'text-emerald-700' : 'text-text'
+                      }`}>
+                        {city}
                       </span>
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
+
+                      {/* Toggle */}
+                      <button
+                        onClick={() => toggleCleaned(city)}
+                        disabled={citySaving}
+                        className="relative w-7 h-[16px] rounded-full cursor-pointer disabled:opacity-40 focus:outline-none shrink-0"
+                        style={{
+                          backgroundColor: isCleaned ? '#10b981' : '#cbd5e1',
+                          transition: 'background-color 0.3s',
+                          boxShadow: isCleaned ? '0 0 0 2px rgba(16,185,129,0.15)' : 'none',
+                        }}
+                      >
+                        <motion.span
+                          layout
+                          transition={{ type: 'spring', stiffness: 500, damping: 30 }}
+                          className="absolute top-[2px] w-3 h-3 rounded-full bg-white shadow-sm flex items-center justify-center"
+                          style={{ left: isCleaned ? 12 : 2 }}
+                        >
+                          <AnimatePresence>
+                            {isCleaned && (
+                              <motion.span
+                                initial={{ opacity: 0, scale: 0 }}
+                                animate={{ opacity: 1, scale: 1 }}
+                                exit={{ opacity: 0, scale: 0 }}
+                              >
+                                <Check size={6} className="text-emerald-500" strokeWidth={3} />
+                              </motion.span>
+                            )}
+                          </AnimatePresence>
+                        </motion.span>
+                      </button>
+                    </motion.div>
+                  )
+                })}
+              </AnimatePresence>
+            </motion.div>
           )}
         </div>
 
-      </div>
+      </motion.div>
     </div>
   )
 }

@@ -7,6 +7,7 @@ import {
   BookOpen,
   ArrowLeftRight,
 } from 'lucide-react'
+import { motion } from 'framer-motion'
 import AttendanceSection from '../components/storage/AttendanceSection'
 import SkipLineSection from '../components/storage/SkipLineSection'
 import LogBookSection from '../components/storage/LogBookSection'
@@ -29,8 +30,8 @@ export default function StorageBrowser() {
   return (
     <div className="flex h-full">
       {/* Left Side Menu */}
-      <div className="w-20 shrink-0 bg-surface border-r border-surface-lighter flex flex-col overflow-y-auto">
-        <nav className="flex flex-col items-center gap-0.5 py-3 px-2">
+      <div className="w-[76px] shrink-0 bg-white border-r border-surface-lighter/70 flex flex-col">
+        <nav className="flex flex-col items-center gap-1 py-3 px-1.5">
           {MENU_ITEMS.map(item => {
             const isActive = activeMenu === item.key
             const isDisabled = item.disabled
@@ -39,21 +40,28 @@ export default function StorageBrowser() {
                 key={item.key}
                 onClick={() => !isDisabled && setActiveMenu(item.key)}
                 disabled={isDisabled}
-                className={`flex flex-col items-center gap-1.5 py-2.5 w-full rounded-xl group ${
-                  isDisabled ? 'opacity-35 cursor-not-allowed' : 'cursor-pointer'
+                className={`relative flex flex-col items-center gap-1 py-2.5 w-full rounded-xl transition-all duration-200 ${
+                  isDisabled ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
                 }`}
               >
-                <div className={`p-2 rounded-[3px] transition-all duration-300 ease-in-out ${
+                {isActive && (
+                  <motion.div
+                    layoutId="activeMenuBg"
+                    className="absolute inset-0 bg-sky-50 border border-sky-200/60 rounded-xl"
+                    transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                  />
+                )}
+                <div className={`relative z-10 p-2 rounded-lg transition-all duration-200 ${
                   isActive
-                    ? 'bg-primary text-white shadow-md shadow-primary/25 scale-105'
+                    ? 'bg-primary text-white shadow-md shadow-primary/25'
                     : isDisabled
-                      ? 'bg-surface-light border border-surface-lighter text-text-muted'
-                      : 'bg-surface-light border border-surface-lighter text-text-muted group-hover:bg-primary/10 group-hover:border-primary/40 group-hover:text-primary group-hover:scale-110 group-active:scale-95'
+                      ? 'text-text-muted'
+                      : 'text-text-muted group-hover:text-primary'
                 }`}>
-                  <item.icon size={18} strokeWidth={isActive ? 2 : 1.5} />
+                  <item.icon size={17} strokeWidth={isActive ? 2.2 : 1.5} />
                 </div>
-                <span className={`text-[10px] leading-tight text-center transition-colors duration-200 ${
-                  isActive ? 'text-primary font-semibold' : 'text-text-muted font-medium'
+                <span className={`relative z-10 text-[9px] leading-tight text-center transition-colors duration-200 ${
+                  isActive ? 'text-primary font-bold' : 'text-text-muted font-medium'
                 }`}>
                   {item.label}
                 </span>
@@ -66,18 +74,10 @@ export default function StorageBrowser() {
       {/* Content Area */}
       <div className="flex-1 min-w-0 bg-surface-light p-2 overflow-y-auto">
         <div className="h-full">
-          {activeMenu === 'attendance' && (
-            <AttendanceSection />
-          )}
-          {activeMenu === 'skipLine' && (
-            <SkipLineSection />
-          )}
-          {activeMenu === 'dutyOnOff' && (
-            <DutyOnOffSection />
-          )}
-          {activeMenu === 'logBook' && (
-            <LogBookSection />
-          )}
+          {activeMenu === 'attendance' && <AttendanceSection />}
+          {activeMenu === 'skipLine' && <SkipLineSection />}
+          {activeMenu === 'dutyOnOff' && <DutyOnOffSection />}
+          {activeMenu === 'logBook' && <LogBookSection />}
           {activeMenu !== 'attendance' && activeMenu !== 'dutyOn' && activeMenu !== 'dutyOff' && activeMenu !== 'dutyOnOff' && activeMenu !== 'skipLine' && activeMenu !== 'logBook' && activeItem && (
             <GenericSection storagePath={activeItem.path} />
           )}
