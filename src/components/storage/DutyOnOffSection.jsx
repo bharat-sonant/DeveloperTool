@@ -18,11 +18,9 @@ export default function DutyOnOffSection() {
 
   // Load cities from Firebase on mount & focus
   useEffect(() => {
-    let cancelled = false
     const refresh = async () => {
       try {
         const remote = await loadDutyOnOffCities()
-        if (cancelled) return
         if (remote) {
           setDutyCities(prev => {
             if (JSON.stringify(prev) === JSON.stringify(remote)) return prev
@@ -36,7 +34,7 @@ export default function DutyOnOffSection() {
     }
     refresh()
     window.addEventListener('focus', refresh)
-    return () => { cancelled = true; window.removeEventListener('focus', refresh) }
+    return () => window.removeEventListener('focus', refresh)
   }, [])
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)
@@ -413,7 +411,7 @@ export default function DutyOnOffSection() {
 
   // Effects
   useEffect(() => {
-    if (!selectedCity) return
+    if (!selectedCity) { setLoadingScanResult(false); return }
     setLoadingScanResult(true)
     setScanResult(null)
     setSelectedWard(null)
