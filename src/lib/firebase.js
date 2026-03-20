@@ -900,9 +900,10 @@ export async function loadDutyOnOffCities() {
   ensureStorage()
   try {
     const fileRef = storageRef(storage, CITY_CONFIG_PATH)
-    const bytes = await getBytes(fileRef)
-    const text = new TextDecoder().decode(bytes)
-    const data = JSON.parse(text)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = await res.json()
     return data.cities || []
   } catch {
     return null
