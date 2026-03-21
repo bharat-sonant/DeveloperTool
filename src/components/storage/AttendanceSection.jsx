@@ -1,225 +1,234 @@
-import { useState, useEffect } from 'react'
-import { Loader2, Calendar, FileImage, Eye, EyeOff, Trash2, Search, RefreshCw, AlertTriangle, X } from 'lucide-react'
-import { getEmployeeFiles, getFileDownloadURL, deleteStorageFiles, scanAttendanceCleanup, saveCleanupResult, loadCleanupResult } from '../../lib/firebase'
+import { useState, useEffect, useRef } from 'react'
+import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
+import { deleteStorageFiles, listAttendanceMonths, scanAttendanceCleanup, saveAttendanceScanResult, loadAttendanceScanResult, loadAttendanceCityConfig } from '../../lib/firebase'
 import { MONTH_ORDER, formatSize } from './utils'
+import CitySelector from '../CitySelector'
+import { getCachedSectionConfig, cacheSectionConfig } from '../../lib/sectionConfig'
 
-export default function AttendanceSection({ selectedCity }) {
+export default function AttendanceSection() {
+  // City selection
+  const cached = getCachedSectionConfig('attendance')
+  const activeCities0 = cached.cities.filter(c => !cached.cleanedCities.includes(c))
+  const [attCities, setAttCities] = useState(activeCities0)
+  const [selectedCity, setSelectedCity] = useState(activeCities0[0] || null)
+
+  useEffect(() => {
+    const refresh = async () => {
+      try {
+        const remote = await loadAttendanceCityConfig()
+        if (remote) {
+          const active = remote.cities.filter(c => !remote.cleanedCities.includes(c))
+          setAttCities(prev => JSON.stringify(prev) === JSON.stringify(active) ? prev : active)
+          cacheSectionConfig('attendance', remote.cities, remote.cleanedCities)
+        }
+      } catch (err) {
+        console.warn('Could not load attendance cities:', err.message)
+      }
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [])
+
   // Scan state
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)
   const [scanResult, setScanResult] = useState(null)
   const [loadingScanResult, setLoadingScanResult] = useState(true)
 
-  // Navigation state (driven by scan result)
+  // Navigation
   const [selectedMonth, setSelectedMonth] = useState(null)
-  const [selectedYear, setSelectedYear] = useState(null)
   const [selectedEmployee, setSelectedEmployee] = useState(null)
 
-  // File browsing state
-  const [empFiles, setEmpFiles] = useState([])
-  const [loadingFiles, setLoadingFiles] = useState(false)
-  const [showImages, setShowImages] = useState(false)
-  const [imageUrls, setImageUrls] = useState({})
+  // Files from scanResult JSON (no extra Firebase calls)
+  const [allDateFiles, setAllDateFiles] = useState({})
   const [selectedFiles, setSelectedFiles] = useState(new Set())
-  const [loadingImages, setLoadingImages] = useState(false)
   const [deleting, setDeleting] = useState(false)
+
+  // Month picker
   const [showRescanModal, setShowRescanModal] = useState(false)
+  const [showMonthPicker, setShowMonthPicker] = useState(false)
+  const [availableMonths, setAvailableMonths] = useState([])
+  const [pickedMonths, setPickedMonths] = useState(new Set())
+  const [loadingMonths, setLoadingMonths] = useState(false)
 
+  // Timer
+  const [elapsedTime, setElapsedTime] = useState(0)
+  const timerRef = useRef(null)
 
-  // Derived: months from scan result sorted by MONTH_ORDER
-  const scanMonths = scanResult
+  // Derived
+  const monthList = scanResult
     ? Object.keys(scanResult.months).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
     : []
 
-  // Derived: years in selected month
-  const monthYears = (scanResult && selectedMonth && scanResult.months[selectedMonth]?.years)
-    ? Object.keys(scanResult.months[selectedMonth].years).sort()
+  const employeeList = (scanResult && selectedMonth && scanResult.months[selectedMonth]?.employees)
+    ? Object.entries(scanResult.months[selectedMonth].employees)
+        .map(([id, data]) => ({ id, totalFiles: data.totalFiles }))
+        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
     : []
 
-  // Derived: employees in selected month (filtered by year if selected)
-  const monthEmployees = (() => {
-    if (!scanResult || !selectedMonth || !scanResult.months[selectedMonth]) return []
-    const emps = scanResult.months[selectedMonth].employees
-    return Object.entries(emps)
-      .map(([id, data]) => {
-        if (!selectedYear) return { id, ...data }
-        const filteredDates = Object.entries(data.dates || {}).filter(([d]) => d.startsWith(selectedYear))
-        if (filteredDates.length === 0) return null
-        const files = filteredDates.reduce((s, [, info]) => s + (info.in ? 1 : 0) + (info.out ? 1 : 0) + (info.other || 0), 0)
-        return { id, files, dates: Object.fromEntries(filteredDates) }
-      })
-      .filter(Boolean)
-      .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
-  })()
+  const dateList = (scanResult && selectedMonth && selectedEmployee &&
+    scanResult.months[selectedMonth]?.employees[selectedEmployee]?.dates)
+    ? Object.entries(scanResult.months[selectedMonth].employees[selectedEmployee].dates)
+        .sort(([a], [b]) => a.localeCompare(b))
+    : []
 
-  // Frozen prefixes for current + previous 2 months
-  const frozenPrefixes = (() => {
-    const now = new Date()
-    const y = now.getFullYear()
-    const m = now.getMonth() + 1
-    const prefixes = new Set()
-    for (let i = 0; i < 3; i++) {
-      let mo = m - i, yr = y
-      if (mo <= 0) { mo += 12; yr -= 1 }
-      prefixes.add(`${yr}-${String(mo).padStart(2, '0')}`)
+  const allFiles = Object.values(allDateFiles).flat()
+
+  // ── Month Picker ──
+
+  const openMonthPicker = async () => {
+    setLoadingMonths(true)
+    setShowRescanModal(false)
+    setShowMonthPicker(true)
+    setPickedMonths(new Set())
+    try {
+      const folders = await listAttendanceMonths(selectedCity)
+      setAvailableMonths(folders)
+    } catch {
+      setAvailableMonths([])
     }
-    return prefixes
-  })()
-
-  // Filter cached scan result to remove dates that are now frozen
-  // (cached scan may have been created when different months were frozen)
-  function filterScanResult(raw) {
-    if (!raw || !raw.months) return raw
-    const result = JSON.parse(JSON.stringify(raw))
-    result.totalFiles = 0
-
-    for (const [month, monthData] of Object.entries(result.months)) {
-      monthData.totalFiles = 0
-      const yearsCount = {}
-
-      for (const [empId, empData] of Object.entries(monthData.employees)) {
-        for (const dateStr of Object.keys(empData.dates || {})) {
-          const ym = dateStr.slice(0, 7) // "YYYY-MM"
-          if (frozenPrefixes.has(ym)) {
-            delete empData.dates[dateStr]
-          }
-        }
-        // Recalculate employee file count from remaining dates
-        empData.files = Object.values(empData.dates || {}).reduce(
-          (s, d) => s + (d.in ? 1 : 0) + (d.out ? 1 : 0) + (d.other || 0), 0
-        )
-        if (empData.files <= 0) {
-          delete monthData.employees[empId]
-        } else {
-          // Accumulate per-year counts
-          for (const dateStr of Object.keys(empData.dates)) {
-            const yr = dateStr.slice(0, 4)
-            yearsCount[yr] = (yearsCount[yr] || 0) +
-              (empData.dates[dateStr].in ? 1 : 0) +
-              (empData.dates[dateStr].out ? 1 : 0) +
-              (empData.dates[dateStr].other || 0)
-          }
-          monthData.totalFiles += empData.files
-        }
-      }
-
-      // Rebuild years from recalculated counts
-      monthData.years = {}
-      for (const [yr, count] of Object.entries(yearsCount)) {
-        monthData.years[yr] = { files: count }
-      }
-
-      if (monthData.totalFiles <= 0) {
-        delete result.months[month]
-      } else {
-        result.totalFiles += monthData.totalFiles
-      }
-    }
-
-    return result
+    setLoadingMonths(false)
   }
 
-  // Filter loaded files: exclude frozen + filter by selected year
-  const filteredFiles = (() => {
-    let files = empFiles.filter(f => {
-      const match = f.name.match(/^(\d{4}-\d{2})/)
-      return !match || !frozenPrefixes.has(match[1])
+  const toggleMonth = (month) => {
+    setPickedMonths(prev => {
+      const next = new Set(prev)
+      if (next.has(month)) next.delete(month)
+      else if (next.size < 3) next.add(month)
+      return next
     })
-    if (selectedYear) files = files.filter(f => f.name.startsWith(selectedYear))
-    return files
-  })()
+  }
+
+  const renderMonthPicker = () => (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowMonthPicker(false)} />
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
+        <button onClick={() => setShowMonthPicker(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
+          <X size={18} className="text-gray-400" />
+        </button>
+        <div className="flex flex-col gap-4">
+          <div>
+            <h3 className="text-lg font-bold text-gray-900 mb-1">Select Months to Scan</h3>
+            <p className="text-xs text-gray-500">Choose up to <span className="font-semibold text-amber-600">3 months</span> at a time. Each month scans all employee folders.</p>
+          </div>
+          {loadingMonths ? (
+            <div className="flex items-center justify-center py-8"><Loader2 size={20} className="animate-spin text-amber-500" /><span className="text-sm text-text-muted ml-2">Loading months...</span></div>
+          ) : availableMonths.length === 0 ? (
+            <div className="text-center py-8 text-sm text-text-muted">No months found</div>
+          ) : (
+            <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100">
+              {availableMonths.map(month => {
+                const isChecked = pickedMonths.has(month)
+                const isDisabled = !isChecked && pickedMonths.size >= 3
+                return (
+                  <button key={month} onClick={() => !isDisabled && toggleMonth(month)}
+                    className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-all ${isChecked ? 'bg-amber-50' : isDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}>
+                    {isChecked ? <CheckSquare size={18} className="text-amber-500 shrink-0" /> : <Square size={18} className="text-gray-300 shrink-0" />}
+                    <span className={`text-sm font-medium ${isChecked ? 'text-amber-700' : 'text-gray-700'}`}>{month}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-gray-500">{pickedMonths.size}/3 selected</span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowMonthPicker(false)} className="px-4 py-2 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">Cancel</button>
+              <button onClick={() => handleScan([...pickedMonths])} disabled={pickedMonths.size === 0}
+                className="px-4 py-2 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed">
+                Start Scan ({pickedMonths.size})
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
 
   // ── Handlers ──
 
-  const handleScan = async () => {
+  function formatElapsed(seconds) {
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    const s = seconds % 60
+    if (h > 0) return `${h}h ${m}m ${s}s`
+    if (m > 0) return `${m}m ${s}s`
+    return `${s}s`
+  }
+
+  const handleScan = async (months) => {
+    setShowMonthPicker(false)
     setScanning(true)
     setScanProgress(null)
+    setElapsedTime(0)
+    timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000)
     try {
-      console.log(`[Attendance] Starting scan for ${selectedCity}...`)
-      const result = await scanAttendanceCleanup(selectedCity, (progress) => {
+      const result = await scanAttendanceCleanup(selectedCity, months, (progress) => {
         setScanProgress(progress)
       })
-      console.log(`[Attendance] Scan complete. ${result.totalFiles} files found. Saving...`)
       setScanResult(result)
-      await saveCleanupResult(selectedCity, result)
-      console.log(`[Attendance] Scan result saved to storage`)
-      // Auto-select first month with data
-      const firstMonth = Object.entries(result.months)
-        .sort(([a], [b]) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
-        .find(([, d]) => d.totalFiles > 0)
+      const firstMonth = Object.keys(result.months)
+        .sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
       if (firstMonth) {
-        setSelectedMonth(firstMonth[0])
-        setSelectedYear(null)
+        setSelectedMonth(firstMonth)
         setSelectedEmployee(null)
       }
     } catch {
       alert('Scan failed. Please try again.')
     }
+    clearInterval(timerRef.current)
     setScanning(false)
   }
 
   const handleDeleteSelected = async () => {
     if (selectedFiles.size === 0) return
-    const confirmed = window.confirm(
-      `Are you sure you want to delete ${selectedFiles.size} file(s)? This action cannot be undone.`
-    )
+    const confirmed = window.confirm(`Are you sure you want to delete ${selectedFiles.size} file(s)? This action cannot be undone.`)
     if (!confirmed) return
     setDeleting(true)
     try {
-      console.log(`[Attendance] Deleting ${selectedFiles.size} files...`)
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
-      console.log(`[Attendance] Delete done. Deleted: ${deleted}, Failed: ${failed.length}`)
-      const remainingFiles = empFiles.filter(f => !selectedFiles.has(f.fullPath) || failed.includes(f.fullPath))
-      setEmpFiles(remainingFiles)
+      const failedSet = new Set(failed)
+
+      // Update allDateFiles
+      setAllDateFiles(prev => {
+        const next = {}
+        for (const [date, files] of Object.entries(prev)) {
+          next[date] = files.filter(f => !selectedFiles.has(f.fullPath) || failedSet.has(f.fullPath))
+        }
+        return next
+      })
       setSelectedFiles(new Set(failed))
 
-      // Update scan result counts after deletion + persist to Firebase
+      // Update scanResult counts
       if (scanResult && selectedMonth && selectedEmployee && deleted > 0) {
         const next = JSON.parse(JSON.stringify(scanResult))
-        const deletedPaths = [...selectedFiles].filter(p => !failed.includes(p))
-        next.totalFiles -= deletedPaths.length
-
-        const monthData = next.months[selectedMonth]
-        if (monthData) {
-          monthData.totalFiles -= deletedPaths.length
-          const empData = monthData.employees[selectedEmployee]
-          if (empData) {
-            empData.files -= deletedPaths.length
-            deletedPaths.forEach(p => {
-              const fileName = p.split('/').pop()
-              const dateMatch = fileName.match(/^(\d{4}-\d{2}-\d{2})/)
-              if (dateMatch && empData.dates[dateMatch[1]]) {
-                const type = fileName.includes('InImage') ? 'in' : fileName.includes('outImage') ? 'out' : 'other'
-                if (type === 'in') empData.dates[dateMatch[1]].in = false
-                else if (type === 'out') empData.dates[dateMatch[1]].out = false
-                const d = empData.dates[dateMatch[1]]
-                if (!d.in && !d.out && (!d.other || d.other === 0)) {
-                  delete empData.dates[dateMatch[1]]
-                }
-              }
-              const yrMatch = fileName.match(/^(\d{4})/)
-              if (yrMatch && monthData.years[yrMatch[1]]) {
-                monthData.years[yrMatch[1]].files--
-                if (monthData.years[yrMatch[1]].files <= 0) delete monthData.years[yrMatch[1]]
-              }
-            })
-            if (empData.files <= 0) delete monthData.employees[selectedEmployee]
+        const empData = next.months[selectedMonth]?.employees[selectedEmployee]
+        if (empData) {
+          const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
+          for (const [date, dateData] of Object.entries(empData.dates || {})) {
+            if (dateData.filesMeta) {
+              dateData.filesMeta = dateData.filesMeta.filter(f => !deletedPaths.has(f.fullPath))
+            }
+            dateData.files = dateData.filesMeta?.length || 0
+            if (dateData.files <= 0) delete empData.dates[date]
           }
-          if (monthData.totalFiles <= 0) delete next.months[selectedMonth]
+          empData.totalFiles = Object.values(empData.dates || {}).reduce((s, d) => s + d.files, 0)
+          if (empData.totalFiles <= 0) delete next.months[selectedMonth].employees[selectedEmployee]
+
+          const monthData = next.months[selectedMonth]
+          if (monthData) {
+            monthData.totalFiles = Object.values(monthData.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
+            if (monthData.totalFiles <= 0) delete next.months[selectedMonth]
+          }
+          next.totalFiles = Object.values(next.months || {}).reduce((s, m) => s + m.totalFiles, 0)
         }
         setScanResult(next)
-        console.log(`[Attendance] Saving updated scan result after delete. New total: ${next.totalFiles}`)
-        saveCleanupResult(selectedCity, next).catch(() => {})
-      }
-
-      if (remainingFiles.length === 0) {
-        const currentIdx = monthEmployees.findIndex(e => e.id === selectedEmployee)
-        const nextEmp = monthEmployees[currentIdx + 1] || monthEmployees[currentIdx - 1]
-        setSelectedEmployee(nextEmp ? nextEmp.id : null)
+        saveAttendanceScanResult(selectedCity, next).catch(() => {})
       }
 
       if (failed.length > 0) {
-        alert(`${deleted} file(s) deleted. ${failed.length} file(s) failed to delete.`)
+        alert(`${deleted} file(s) deleted. ${failed.length} file(s) failed.`)
       }
     } catch {
       alert('Failed to delete files. Please try again.')
@@ -239,73 +248,50 @@ export default function AttendanceSection({ selectedCity }) {
 
   // ── Effects ──
 
+  // Load scan result when city changes
   useEffect(() => {
-    if (!selectedCity) return
+    if (!selectedCity) { setLoadingScanResult(false); return }
     setLoadingScanResult(true)
     setScanResult(null)
     setSelectedMonth(null)
-    setSelectedYear(null)
     setSelectedEmployee(null)
-    setEmpFiles([])
-    console.log(`[Attendance] Loading cached scan result for ${selectedCity}...`)
-    loadCleanupResult(selectedCity).then(cached => {
+    setAllDateFiles({})
+    loadAttendanceScanResult(selectedCity).then(cached => {
       if (cached) {
-        console.log(`[Attendance] Cached result loaded. Filtering frozen months...`)
-        const filtered = filterScanResult(cached)
-        console.log(`[Attendance] After filtering: ${filtered.totalFiles} files, ${Object.keys(filtered.months || {}).length} months`)
-        setScanResult(filtered)
-        const firstMonth = Object.entries(filtered.months)
-          .sort(([a], [b]) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
-          .find(([, d]) => d.totalFiles > 0)
-        if (firstMonth) setSelectedMonth(firstMonth[0])
+        setScanResult(cached)
+        const firstMonth = Object.keys(cached.months || {})
+          .sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+        if (firstMonth) setSelectedMonth(firstMonth)
       }
     }).finally(() => setLoadingScanResult(false))
   }, [selectedCity])
 
-  // Auto-select first employee when month/year changes
+  // Auto-select first employee when month changes
   useEffect(() => {
-    if (monthEmployees.length > 0 && !monthEmployees.find(e => e.id === selectedEmployee)) {
-      setSelectedEmployee(monthEmployees[0].id)
+    if (employeeList.length > 0 && !employeeList.find(e => e.id === selectedEmployee)) {
+      setSelectedEmployee(employeeList[0].id)
     }
-  }, [selectedMonth, selectedYear, monthEmployees.length])
+  }, [selectedMonth, employeeList.length])
 
+  // Load files from scanResult JSON — no Firebase hit
   useEffect(() => {
-    if (!selectedCity || !selectedMonth || !selectedEmployee) { setEmpFiles([]); return }
-    let cancelled = false
-    setLoadingFiles(true)
-    setImageUrls({})
+    if (!selectedCity || !selectedMonth || !selectedEmployee || !scanResult) {
+      setAllDateFiles({})
+      return
+    }
     setSelectedFiles(new Set())
-    console.log(`[Attendance] Loading files for ${selectedCity}/${selectedMonth}/${selectedEmployee}`)
-    getEmployeeFiles(selectedCity, selectedMonth, selectedEmployee)
-      .then(files => { if (!cancelled) setEmpFiles(files) })
-      .catch(() => { if (!cancelled) setEmpFiles([]) })
-      .finally(() => { if (!cancelled) setLoadingFiles(false) })
-    return () => { cancelled = true }
-  }, [selectedCity, selectedMonth, selectedEmployee])
+    const empData = scanResult.months[selectedMonth]?.employees[selectedEmployee]
+    if (!empData?.dates) {
+      setAllDateFiles({})
+      return
+    }
+    const map = {}
+    for (const [date, dateData] of Object.entries(empData.dates)) {
+      map[date] = dateData.filesMeta || []
+    }
+    setAllDateFiles(map)
+  }, [selectedCity, selectedMonth, selectedEmployee, scanResult])
 
-  useEffect(() => {
-    if (!showImages || empFiles.length === 0) return
-    const toFetch = empFiles.filter(f => !imageUrls[f.fullPath])
-    if (toFetch.length === 0) return
-    console.log(`[Attendance] Fetching ${toFetch.length} image download URLs...`)
-    let cancelled = false
-    setLoadingImages(true)
-    Promise.all(
-      toFetch.map(f =>
-        getFileDownloadURL(f.fullPath)
-          .then(url => ({ path: f.fullPath, url }))
-          .catch(() => ({ path: f.fullPath, url: null }))
-      )
-    ).then(results => {
-      if (cancelled) return
-      setImageUrls(prev => {
-        const next = { ...prev }
-        results.forEach(r => { next[r.path] = r.url })
-        return next
-      })
-    }).finally(() => { if (!cancelled) setLoadingImages(false) })
-    return () => { cancelled = true }
-  }, [showImages, empFiles])
 
   // ── Render ──
 
@@ -319,43 +305,66 @@ export default function AttendanceSection({ selectedCity }) {
 
   if (!scanResult && !scanning) {
     return (
+      <>
       <div className="flex flex-col items-center justify-center h-full gap-4">
+        <CitySelector cities={attCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         <div className="w-16 h-16 rounded-2xl bg-amber-500/10 flex items-center justify-center">
           <Search size={28} className="text-amber-500" />
         </div>
         <div className="text-center">
-          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data for {selectedCity}</h3>
-          <p className="text-xs text-text-muted mb-4">Scan attendance folders to see what data needs cleanup</p>
+          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data</h3>
+          <p className="text-xs text-text-muted mb-1">Scan attendance folders to find old files for cleanup</p>
         </div>
         <button
-          onClick={handleScan}
+          onClick={openMonthPicker}
           className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-amber-500 text-white hover:bg-amber-600 transition-all cursor-pointer shadow-sm"
         >
           <Search size={16} />
-          Scan for Cleanup
+          Scan Attendance
         </button>
       </div>
+      {showMonthPicker && renderMonthPicker()}
+      </>
     )
   }
 
   if (scanning) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Loader2 size={32} className="animate-spin text-amber-500" />
-        <span className="text-sm font-medium text-amber-700">
-          Scanning {scanProgress?.currentMonth || '...'}
-        </span>
-        {scanProgress && (
-          <>
-            <span className="text-xs text-text-muted">{scanProgress.scannedMonths}/{scanProgress.totalMonths} months</span>
-            <div className="w-72 h-2 bg-amber-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-amber-500 rounded-full transition-all duration-300"
-                style={{ width: `${(scanProgress.scannedMonths / scanProgress.totalMonths) * 100}%` }}
-              />
-            </div>
-          </>
+        <Loader2 size={28} className="animate-spin text-amber-500" />
+
+        {scanProgress?.month && (
+          <div className="text-center">
+            <span className="text-xs text-text-muted">Month</span>
+            <span className="text-sm font-bold text-amber-600 ml-1.5">{scanProgress.month}</span>
+          </div>
         )}
+
+        {scanProgress?.employee && (
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-text-muted">Employee</span>
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
+              {scanProgress.employee}
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-center gap-4 text-[11px]">
+          <div className="flex items-center gap-1.5 text-text-muted">
+            <Clock size={12} />
+            <span className="font-semibold text-amber-700">{formatElapsed(elapsedTime)}</span>
+          </div>
+          {scanProgress?.filesFound > 0 && (
+            <span className="text-text-muted">
+              <span className="font-bold text-emerald-600">{scanProgress.filesFound}</span> files
+            </span>
+          )}
+          {scanProgress?.hits > 0 && (
+            <span className="text-text-muted">
+              <span className="font-bold text-sky-600">{scanProgress.hits}</span> API hits
+            </span>
+          )}
+        </div>
       </div>
     )
   }
@@ -363,130 +372,95 @@ export default function AttendanceSection({ selectedCity }) {
   return (
     <>
     <div className="h-full p-[1px] rounded-xl relative overflow-hidden" style={{
-      background: 'conic-gradient(from var(--border-angle, 0deg), #818cf8, #a78bfa, #f472b6, #818cf8)',
+      background: 'conic-gradient(from var(--border-angle, 0deg), #f59e0b, #f97316, #ef4444, #f59e0b)',
       animation: 'spin-border 3s linear infinite'
     }}>
     <style>{`@keyframes spin-border { to { --border-angle: 360deg; } } @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }`}</style>
     <div className="flex flex-col h-full rounded-[10px] overflow-hidden bg-white">
-        {/* Top bar */}
-        <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
-          <div className="flex items-center gap-3">
-            <h3 className="text-sm font-semibold text-text">{selectedCity} — Storage Cleanup</h3>
-            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-danger/10 text-danger border border-danger/20">
-              {scanResult.totalFiles} files to delete
-            </span>
-            {scanResult.scannedAt && (
-              <span className="text-[9px] text-text-muted">Scanned {timeAgo(scanResult.scannedAt)}</span>
-            )}
-          </div>
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={() => setShowRescanModal(true)}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-amber-500/10 text-amber-600 border border-amber-500/20 hover:bg-amber-500/20"
-            >
-              <RefreshCw size={12} />
-              Re-scan
-            </button>
-          </div>
+      {/* Top strip */}
+      <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-text">Attendance</h3>
+          <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 border border-amber-500/20">
+            {scanResult.totalFiles} files
+          </span>
         </div>
+        <div className="flex items-center gap-2">
+          {scanResult.scannedAt && (
+            <span className="text-[9px] text-text-muted">{timeAgo(scanResult.scannedAt)}</span>
+          )}
+          <button
+            onClick={() => setShowRescanModal(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-amber-500/10 text-amber-600 border border-amber-500/20 hover:bg-amber-500/20"
+          >
+            <RefreshCw size={12} />
+            Re Scan
+          </button>
+          <div className="w-px h-5 bg-surface-lighter" />
+          <CitySelector cities={attCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
+        </div>
+      </div>
 
-
-        {/* Year filter + Employee + Files area */}
-        {selectedMonth && scanResult.months[selectedMonth] && (
-          <>
-            {monthYears.length > 1 && (
-              <div className="flex items-center gap-1.5 pb-3 mb-3 border-b border-surface-lighter">
-                <span className="text-[10px] text-text-muted mr-1">Year:</span>
-                <button
-                  onClick={() => setSelectedYear(null)}
-                  className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
-                    !selectedYear ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
-                  }`}
-                >
-                  All ({scanResult.months[selectedMonth].totalFiles})
-                </button>
-                {monthYears.map(yr => {
-                  const yd = scanResult.months[selectedMonth].years[yr]
+      {/* Body */}
+      <div className="flex flex-1 min-h-0">
+        {/* Left: Employee list */}
+        <div className="w-22 shrink-0 border-r border-surface-lighter flex flex-col bg-gray-100">
+          <div className="flex-1 overflow-y-auto">
+            {employeeList.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-text-muted text-xs">No employees</div>
+            ) : (
+              <div className="flex flex-col">
+                {employeeList.map((emp, idx) => {
+                  const isSelected = selectedEmployee === emp.id
                   return (
-                    <button
-                      key={yr}
-                      onClick={() => setSelectedYear(selectedYear === yr ? null : yr)}
-                      className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
-                        selectedYear === yr ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
-                      }`}
-                    >
-                      {yr} ({yd.files})
-                    </button>
+                    <div key={emp.id}>
+                      {idx > 0 && <hr className="border-surface-lighter" />}
+                      <button
+                        onClick={() => { setSelectedEmployee(emp.id); setAllDateFiles({}) }}
+                        className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer ${
+                          isSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
+                        }`}
+                      >
+                        <div className={`text-[11px] font-semibold truncate ${isSelected ? 'text-gray-800' : 'text-text'}`}>
+                          {emp.id}
+                        </div>
+                      </button>
+                    </div>
                   )
                 })}
               </div>
             )}
+          </div>
+        </div>
 
-            <div className="flex flex-1 min-h-0">
-              {/* Employee list */}
-              <div className="w-32 shrink-0 border-r border-surface-lighter overflow-y-auto bg-gray-100">
-                {monthEmployees.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-text-muted text-xs">No records</div>
-                ) : (
-                  <div className="flex flex-col">
-                    {monthEmployees.map((emp, idx) => {
-                      const isEmpSelected = selectedEmployee === emp.id
-                      return (
-                        <div key={emp.id}>
-                          {idx > 0 && <hr className="border-surface-lighter" />}
-                          <button
-                            onClick={() => setSelectedEmployee(emp.id)}
-                            className={`w-full px-3 py-2 text-left transition-all cursor-pointer ${
-                              isEmpSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
-                            }`}
-                          >
-                            <div className={`text-[11px] font-semibold ${isEmpSelected ? 'text-gray-800' : 'text-text'}`}>{emp.id}</div>
-                          </button>
-                        </div>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-
-              {/* File details */}
-              <div className="flex-1 min-w-0 overflow-y-auto bg-white flex flex-col">
-                {/* Month strip at top of content area */}
-                <div className="flex items-center gap-2 flex-wrap px-4 py-2 border-b border-surface-lighter bg-white shrink-0">
-                  {selectedEmployee && (
-                    <>
-                      <span className="text-[10px] font-semibold text-text">Employee {selectedEmployee}</span>
-                      {filteredFiles.length > 0 && (
-                        <span className="text-[9px] text-text-muted">
-                          ({filteredFiles.length} files · {formatSize(filteredFiles.reduce((s, f) => s + f.size, 0))})
-                        </span>
-                      )}
-                    </>
-                  )}
-                  {scanMonths.length > 0 && (
-                    <>
-                      {selectedEmployee && <span className="text-[10px] text-text-muted mx-1">|</span>}
-                      {scanMonths.map(month => {
-                        const data = scanResult.months[month]
-                        const isSelected = selectedMonth === month
-                        return (
-                          <button
-                            key={month}
-                            onClick={() => { setSelectedMonth(isSelected ? null : month); setSelectedYear(null); setSelectedEmployee(null); setEmpFiles([]) }}
-                            className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
-                              isSelected
-                                ? 'bg-primary text-white shadow-sm'
-                                : 'bg-white text-black border border-primary/20 hover:bg-primary/15'
-                            }`}
-                          >
-                            {month} <span className={`text-[8px] ${isSelected ? 'text-white' : 'text-danger'}`}>{data.totalFiles}</span>
-                          </button>
-                        )
-                      })}
-                    </>
-                  )}
-                  {scanMonths.length === 0 && (
-                    <div className="text-xs text-success font-medium">All clean — no files to delete</div>
+        {/* Right: Content */}
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          {!selectedMonth ? (
+            <div className="flex items-center justify-center h-full text-text-muted text-sm">Select a month</div>
+          ) : (
+            <>
+              <div className="px-4 pt-3 space-y-3">
+                {/* Month pills */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  {monthList.map(month => {
+                    const isActive = selectedMonth === month
+                    const mData = scanResult.months[month]
+                    return (
+                      <button
+                        key={month}
+                        onClick={() => { setSelectedMonth(month); setSelectedEmployee(null); setAllDateFiles({}) }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                          isActive ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
+                        }`}
+                      >
+                        {month} ({mData.totalFiles})
+                      </button>
+                    )
+                  })}
+                  {selectedEmployee && Object.keys(allDateFiles).length > 0 && (
+                    <span className="text-[9px] text-text-muted">
+                      · {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}
+                    </span>
                   )}
                   <div className="flex items-center gap-1.5 ml-auto">
                     {selectedFiles.size > 0 && (
@@ -499,70 +473,54 @@ export default function AttendanceSection({ selectedCity }) {
                         {deleting ? 'Deleting...' : `Delete (${selectedFiles.size})`}
                       </button>
                     )}
-                    <button
-                      onClick={() => setShowImages(prev => !prev)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                        showImages ? 'bg-primary text-white' : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
-                      }`}
-                    >
-                      {showImages ? <Eye size={13} /> : <EyeOff size={13} />}
-                      {showImages ? 'Images ON' : 'Images OFF'}
-                      {loadingImages && <Loader2 size={12} className="animate-spin ml-0.5" />}
-                    </button>
-                    {filteredFiles.length > 0 && (
+                    {allFiles.length > 0 && (
                       <button
                         onClick={() => {
-                          if (selectedFiles.size === filteredFiles.length) {
-                            setSelectedFiles(new Set())
-                          } else {
-                            setSelectedFiles(new Set(filteredFiles.map(f => f.fullPath)))
-                          }
+                          if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set())
+                          else setSelectedFiles(new Set(allFiles.map(f => f.fullPath)))
                         }}
                         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                          selectedFiles.size === filteredFiles.length && filteredFiles.length > 0
+                          selectedFiles.size === allFiles.length && allFiles.length > 0
                             ? 'bg-primary text-white'
                             : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
                         }`}
                       >
-                        {selectedFiles.size === filteredFiles.length && filteredFiles.length > 0 ? 'Deselect All' : 'Select All'}
+                        {selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'Deselect All' : 'Select All'}
                       </button>
                     )}
                   </div>
                 </div>
-                <div className="flex-1 overflow-y-auto p-4">
-                {!selectedEmployee ? (
-                  <div className="flex items-center justify-center h-full text-text-muted text-sm">Select an employee</div>
-                ) : loadingFiles ? (
-                  <div className="flex items-center justify-center h-full">
-                    <Loader2 size={20} className="animate-spin text-primary" />
-                  </div>
-                ) : filteredFiles.length === 0 ? (
-                  <div className="flex items-center justify-center h-full text-text-muted text-sm">No files found</div>
-                ) : (
-                  <div>
-                    {(() => {
-                      const grouped = {}
-                      filteredFiles.forEach(file => {
-                        const match = file.name.match(/^(\d{4}-\d{2}-\d{2})/)
-                        const dateKey = match ? match[1] : 'Unknown'
-                        if (!grouped[dateKey]) grouped[dateKey] = []
-                        grouped[dateKey].push(file)
-                      })
-                      const sortedDates = Object.keys(grouped).sort()
-                      return (
-                        <div className="grid grid-cols-5 gap-3">
-                          {sortedDates.map(dateKey => (
-                            <div key={dateKey} className="rounded-[5px] border border-surface-lighter bg-surface-light/30 overflow-hidden">
-                              <div className="flex items-center justify-between px-3 py-2 bg-gray-100 border-b border-surface-lighter">
+              </div>
+
+              {/* Date cards grid */}
+              {selectedEmployee ? (
+                <div className="flex-1 overflow-y-auto mt-3 border-t border-surface-lighter p-4">
+                  {dateList.length === 0 ? (
+                    <div className="flex items-center justify-center h-32 text-text-muted text-xs">No dates found</div>
+                  ) : (
+                    <div className="grid grid-cols-5 gap-2">
+                      {dateList.map(([date]) => {
+                        const files = allDateFiles[date] || []
+                        return (
+                          <div key={date} className="rounded-[5px] border border-surface-lighter overflow-hidden">
+                            <div className="px-2 py-1.5 flex items-center justify-between bg-gray-100">
+                              <div className="flex items-center gap-1.5">
+                                <Calendar size={12} className="text-gray-500" />
+                                <span className="text-[10px] font-semibold text-gray-700">{date}</span>
+                              </div>
+                              {files.length > 0 && (
                                 <div className="flex items-center gap-1.5">
+                                  <span className="text-[8px] text-gray-500">
+                                    {formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}
+                                  </span>
                                   <input
                                     type="checkbox"
-                                    className="w-3.5 h-3.5 rounded accent-primary cursor-pointer"
-                                    checked={grouped[dateKey].every(f => selectedFiles.has(f.fullPath))}
+                                    className="w-3 h-3 rounded accent-primary cursor-pointer"
+                                    checked={files.every(f => selectedFiles.has(f.fullPath))}
                                     onChange={(e) => {
                                       setSelectedFiles(prev => {
                                         const next = new Set(prev)
-                                        grouped[dateKey].forEach(f => {
+                                        files.forEach(f => {
                                           if (e.target.checked) next.add(f.fullPath)
                                           else next.delete(f.fullPath)
                                         })
@@ -570,46 +528,51 @@ export default function AttendanceSection({ selectedCity }) {
                                       })
                                     }}
                                   />
-                                  <Calendar size={12} className="text-primary/60" />
-                                  <span className="text-[11px] font-semibold text-text">{dateKey}</span>
                                 </div>
-                                <span className="text-[9px] text-text-muted bg-white px-1.5 py-0.5 rounded-full">{grouped[dateKey].length} files</span>
-                              </div>
-                              <div className="p-2 grid grid-cols-2 gap-1.5">
-                                {grouped[dateKey].map(file => {
-                                  const type = file.name.includes('InImage') ? 'In' : file.name.includes('outImage') ? 'Out' : '—'
-                                  return (
-                                    <div
-                                      key={file.name}
-                                      className="flex flex-col gap-1.5 p-2 rounded-lg bg-white border border-surface-lighter hover:border-primary/30 hover:shadow-sm transition-all cursor-pointer group overflow-hidden"
-                                    >
-                                      {showImages && imageUrls[file.fullPath] ? (
-                                        <img src={imageUrls[file.fullPath]} alt={file.name} className="w-full h-16 object-cover rounded-md bg-surface" loading="lazy" />
-                                      ) : (
-                                        <FileImage size={16} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
-                                      )}
-                                      <div className="flex items-center justify-between">
-                                        <span className="text-[9px] text-text-muted">{formatSize(file.size)}</span>
-                                        <span className={`text-[9px] font-medium px-1 py-0.5 rounded ${
-                                          type === 'In' ? 'bg-success/10 text-success' : type === 'Out' ? 'bg-danger/10 text-danger' : 'bg-surface-light text-text-muted'
-                                        }`}>{type}</span>
-                                      </div>
-                                    </div>
-                                  )
-                                })}
-                              </div>
+                              )}
                             </div>
-                          ))}
-                        </div>
-                      )
-                    })()}
-                  </div>
-                )}
+                            <div className="p-2 bg-white">
+                              {files.length === 0 ? (
+                                <div className="text-center py-1 text-text-muted text-[9px]">No files</div>
+                              ) : (
+                                <div className="flex gap-1 overflow-x-auto justify-center">
+                                  {files.map(file => {
+                                    const type = file.source === 'in' ? 'In' : file.source === 'out' ? 'Out' : '—'
+                                    return (
+                                      <div
+                                        key={file.fullPath}
+                                        className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden"
+                                      >
+                                        {file.url ? (
+                                          <img src={file.url} alt={file.name} className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
+                                        ) : (
+                                          <div className="flex flex-col items-center justify-center w-[80px] h-[80px] bg-surface-light rounded">
+                                            <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
+                                            <span className="text-[8px] text-text-muted mt-1">{formatSize(file.size)}</span>
+                                            <span className={`text-[7px] font-medium mt-0.5 ${
+                                              type === 'In' ? 'text-emerald-600' : type === 'Out' ? 'text-orange-600' : 'text-gray-400'
+                                            }`}>{type}</span>
+                                          </div>
+                                        )}
+                                      </div>
+                                    )
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
                 </div>
-              </div>
-            </div>
-          </>
-        )}
+              ) : (
+                <div className="flex items-center justify-center flex-1 text-text-muted text-sm">Select an employee</div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
     </div>
 
@@ -618,59 +581,48 @@ export default function AttendanceSection({ selectedCity }) {
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowRescanModal(false)} />
         <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-          <button
-            onClick={() => setShowRescanModal(false)}
-            className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
-          >
+          <button onClick={() => setShowRescanModal(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
             <X size={18} className="text-gray-400" />
           </button>
-
           <div className="flex flex-col items-center text-center gap-4">
             <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center">
               <AlertTriangle size={28} className="text-amber-500" />
             </div>
-
             <div>
               <h3 className="text-lg font-bold text-gray-900 mb-2">Re-scan Confirmation</h3>
               <p className="text-sm text-gray-600 leading-relaxed">
-                Re-scanning is a <span className="font-semibold text-amber-600">time-consuming process</span>.
-                Depending on total files, it can take <span className="font-semibold">several hours</span> to complete.
+                This scans <span className="font-semibold text-amber-600">all employee folders</span> per month.
+                It will take <span className="font-semibold">significantly longer</span> for months with many employees.
               </p>
             </div>
-
             <div className="w-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file in storage, which significantly <span className="font-semibold">increases server costs</span></p>
+                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file — <span className="font-semibold">increases API costs</span></p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added or files have changed</p>
+                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Previous scan results will be replaced with fresh data</p>
+                <p className="text-xs text-amber-800 text-left">Selected months will be replaced with fresh data, other months stay intact</p>
               </div>
             </div>
-
             <div className="flex items-center gap-3 w-full pt-2">
-              <button
-                onClick={() => setShowRescanModal(false)}
-                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer"
-              >
+              <button onClick={() => setShowRescanModal(false)} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">
                 Cancel
               </button>
-              <button
-                onClick={() => { setShowRescanModal(false); handleScan() }}
-                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25"
-              >
-                Continue Scanning
+              <button onClick={openMonthPicker} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25">
+                Continue
               </button>
             </div>
           </div>
         </div>
       </div>
     )}
+
+    {showMonthPicker && renderMonthPicker()}
 
     <style>{`
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }

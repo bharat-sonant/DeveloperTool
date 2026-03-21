@@ -6,6 +6,7 @@ import {
   MapPin,
   BookOpen,
   ArrowLeftRight,
+  Lock,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import AttendanceSection from '../components/storage/AttendanceSection'
@@ -15,23 +16,31 @@ import DutyOnOffSection from '../components/storage/DutyOnOffSection'
 import GenericSection from '../components/storage/GenericSection'
 
 const MENU_ITEMS = [
-  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement', disabled: true },
+  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement' },
   { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '' },
-  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData', disabled: true },
+  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData' },
+  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages' },
   { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData', disabled: true },
   { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData', disabled: true },
-  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages', disabled: true },
 ]
 
 export default function StorageBrowser() {
-  const [activeMenu, setActiveMenu] = useState('dutyOnOff')
+  const [activeMenu, setActiveMenu] = useState('attendance')
   const activeItem = MENU_ITEMS.find(m => m.key === activeMenu)
 
   return (
     <div className="flex h-full">
-      {/* Left Side Menu */}
-      <div className="w-[76px] shrink-0 bg-white border-r border-surface-lighter/70 flex flex-col">
-        <nav className="flex flex-col items-center gap-1 py-3 px-1.5">
+      {/* Left Sidebar - ClickUp style */}
+      <div className="w-[180px] shrink-0 bg-white border-r border-slate-200/70 flex flex-col">
+        {/* Section header */}
+        <div className="px-4 pt-4 pb-2">
+          <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            Sections
+          </span>
+        </div>
+
+        {/* Menu items */}
+        <nav className="flex flex-col gap-0.5 px-2 pb-3">
           {MENU_ITEMS.map(item => {
             const isActive = activeMenu === item.key
             const isDisabled = item.disabled
@@ -40,31 +49,57 @@ export default function StorageBrowser() {
                 key={item.key}
                 onClick={() => !isDisabled && setActiveMenu(item.key)}
                 disabled={isDisabled}
-                className={`relative flex flex-col items-center gap-1 py-2.5 w-full rounded-xl transition-all duration-200 ${
-                  isDisabled ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
-                }`}
+                className={`group relative flex items-center gap-2.5 px-2.5 py-[9px] rounded-md transition-all duration-150
+                  ${isDisabled
+                    ? 'cursor-not-allowed'
+                    : 'cursor-pointer hover:bg-slate-50'
+                  }
+                `}
               >
+                {/* Active background */}
                 {isActive && (
                   <motion.div
                     layoutId="activeMenuBg"
-                    className="absolute inset-0 bg-sky-50 border border-sky-200/60 rounded-xl"
-                    transition={{ type: 'spring', stiffness: 400, damping: 30 }}
+                    className="absolute inset-0 bg-primary/[0.07] rounded-md"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
                   />
                 )}
-                <div className={`relative z-10 p-2 rounded-lg transition-all duration-200 ${
+
+                {/* Active left bar */}
+                {isActive && (
+                  <motion.div
+                    layoutId="activeBar"
+                    className="absolute left-0 top-1.5 bottom-1.5 w-[3px] bg-primary rounded-r-full"
+                    transition={{ type: 'spring', stiffness: 500, damping: 35 }}
+                  />
+                )}
+
+                {/* Icon */}
+                <div className={`relative z-10 transition-colors duration-150 ${
                   isActive
-                    ? 'bg-primary text-white shadow-md shadow-primary/25'
+                    ? 'text-primary'
                     : isDisabled
-                      ? 'text-text-muted'
-                      : 'text-text-muted group-hover:text-primary'
+                      ? 'text-slate-300'
+                      : 'text-slate-400 group-hover:text-slate-600'
                 }`}>
-                  <item.icon size={17} strokeWidth={isActive ? 2.2 : 1.5} />
+                  <item.icon size={16} strokeWidth={isActive ? 2 : 1.6} />
                 </div>
-                <span className={`relative z-10 text-[9px] leading-tight text-center transition-colors duration-200 ${
-                  isActive ? 'text-primary font-bold' : 'text-text-muted font-medium'
+
+                {/* Label */}
+                <span className={`relative z-10 text-[12px] transition-colors duration-150 flex-1 text-left ${
+                  isActive
+                    ? 'text-primary font-semibold'
+                    : isDisabled
+                      ? 'text-slate-300 font-medium'
+                      : 'text-slate-500 font-medium group-hover:text-slate-700'
                 }`}>
                   {item.label}
                 </span>
+
+                {/* Lock icon for disabled */}
+                {isDisabled && (
+                  <Lock size={11} className="relative z-10 text-slate-300" strokeWidth={2} />
+                )}
               </button>
             )
           })}

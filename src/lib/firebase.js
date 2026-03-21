@@ -207,111 +207,152 @@ export async function deleteStorageFiles(fullPaths) {
   return { deleted: fullPaths.length - failed.length, failed }
 }
 
-// ── Scan Cleanup ──
+// ── Attendance Scan ──
 
-export async function scanAttendanceCleanup(cityPath, onProgress) {
+/** List all month folders under {city}/AttendanceManagement */
+const MONTH_SORT_ORDER = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
+
+export async function listAttendanceMonths(cityPath) {
   ensureStorage()
   const basePath = `${cityPath}/AttendanceManagement`
-  console.log(`[Storage:scanAttendance] listAll → ${basePath}`)
-  const monthsResult = await listAll(storageRef(storage, basePath))
-  const monthFolders = monthsResult.prefixes.map(p => p.name).sort()
-  console.log(`[Storage:scanAttendance] ${monthFolders.length} month folders found:`, monthFolders)
+  const result = await listAll(storageRef(storage, basePath))
+  return result.prefixes
+    .map(p => p.name)
+    .filter(n => n !== 'cleanupScanResult.json')
+    .sort((a, b) => (MONTH_SORT_ORDER[a] || 99) - (MONTH_SORT_ORDER[b] || 99))
+}
 
+/** Scan selected months (max 3) — stores filesMeta, merges with existing result */
+export async function scanAttendanceCleanup(cityPath, selectedMonths, onProgress) {
+  ensureStorage()
+  const basePath = `${cityPath}/AttendanceManagement`
+
+  // Frozen: current + previous month
   const now = new Date()
-  const y = now.getFullYear()
-  const m = now.getMonth() + 1
-  const frozenPrefixes = new Set()
-  for (let i = 0; i < 3; i++) {
-    let mo = m - i, yr = y
-    if (mo <= 0) { mo += 12; yr -= 1 }
-    frozenPrefixes.add(`${yr}-${String(mo).padStart(2, '0')}`)
-  }
+  const curY = now.getFullYear()
+  const curM = now.getMonth() + 1
+  const prevM = curM === 1 ? 12 : curM - 1
+  const prevY = curM === 1 ? curY - 1 : curY
+  const frozenPrefixes = new Set([
+    `${curY}-${String(curM).padStart(2, '0')}`,
+    `${prevY}-${String(prevM).padStart(2, '0')}`,
+  ])
 
-  const result = {
+  // Load existing scan result to merge
+  const existing = await loadAttendanceScanResult(cityPath)
+  const scanData = {
     city: cityPath,
     scannedAt: now.toISOString(),
     totalFiles: 0,
-    months: {},
+    months: existing?.months || {},
+  }
+  // Remove months being re-scanned (fresh data will replace them)
+  for (const month of selectedMonths) {
+    delete scanData.months[month]
   }
 
-  let scannedMonths = 0
-  for (const month of monthFolders) {
-    if (month === 'cleanupScanResult.json') continue
-    console.log(`[Storage:scanAttendance] listAll → ${basePath}/${month}`)
+  let hitCount = 0
+  const progress = { month: '', employee: '', hits: 0, filesFound: 0, lastFile: '' }
+  const updateProgress = (updates) => {
+    Object.assign(progress, updates)
+    if (onProgress) onProgress({ ...progress })
+  }
+
+  for (const month of selectedMonths) {
+    updateProgress({ month, employee: '', lastFile: '' })
+    const monthData = { totalFiles: 0, employees: {} }
+
+    hitCount++
+    updateProgress({ hits: hitCount })
     const empResult = await listAll(storageRef(storage, `${basePath}/${month}`))
     const empFolders = empResult.prefixes
-    console.log(`[Storage:scanAttendance] ${month}: ${empFolders.length} employee folders`)
-
-    const monthData = { totalFiles: 0, years: {}, employees: {} }
 
     for (const empRef of empFolders) {
-      console.log(`[Storage:scanAttendance] listAll → ${empRef.fullPath}`)
-      const filesResult = await listAll(storageRef(storage, empRef.fullPath))
       const empId = empRef.name
-      console.log(`[Storage:scanAttendance] ${month}/${empId}: ${filesResult.items.length} files`)
-      const empData = { files: 0, dates: {} }
+      hitCount++
+      updateProgress({ employee: empId, hits: hitCount })
 
-      for (const fileItem of filesResult.items) {
-        const fullMatch = fileItem.name.match(/^(\d{4})-(\d{2})-(\d{2})/)
-        if (!fullMatch) continue
+      const filesResult = await listAll(storageRef(storage, empRef.fullPath))
+      const empData = { totalFiles: 0, dates: {} }
+
+      // Fetch metadata for all files in parallel
+      const filesMeta = await Promise.all(filesResult.items.map(async (item) => {
+        const fullMatch = item.name.match(/^(\d{4})-(\d{2})-(\d{2})/)
+        if (!fullMatch) return null
         const yearMonth = `${fullMatch[1]}-${fullMatch[2]}`
-        if (frozenPrefixes.has(yearMonth)) continue
+        if (frozenPrefixes.has(yearMonth)) return null
 
-        const dateStr = `${fullMatch[1]}-${fullMatch[2]}-${fullMatch[3]}`
-        const yearStr = fullMatch[1]
-        const type = fileItem.name.includes('InImage') ? 'in' : fileItem.name.includes('outImage') ? 'out' : 'other'
+        hitCount++
+        updateProgress({ hits: hitCount, lastFile: item.name, filesFound: scanData.totalFiles })
+        try {
+          const [meta, downloadUrl] = await Promise.all([
+            getMetadata(item),
+            getDownloadURL(item),
+          ])
+          const source = item.name.includes('InImage') ? 'in' : item.name.includes('outImage') ? 'out' : 'other'
+          return {
+            name: meta.name,
+            fullPath: meta.fullPath,
+            size: meta.size,
+            contentType: meta.contentType,
+            timeCreated: meta.timeCreated,
+            url: downloadUrl,
+            source,
+            date: `${fullMatch[1]}-${fullMatch[2]}-${fullMatch[3]}`,
+          }
+        } catch {
+          return null
+        }
+      }))
 
-        empData.files++
+      const validFiles = filesMeta.filter(Boolean)
 
-        if (!empData.dates[dateStr]) empData.dates[dateStr] = { in: false, out: false, other: 0 }
-        if (type === 'in') empData.dates[dateStr].in = true
-        else if (type === 'out') empData.dates[dateStr].out = true
-        else empData.dates[dateStr].other++
-
-        if (!monthData.years[yearStr]) monthData.years[yearStr] = { files: 0 }
-        monthData.years[yearStr].files++
+      // Group files by date
+      for (const file of validFiles) {
+        if (!empData.dates[file.date]) empData.dates[file.date] = { files: 0, filesMeta: [] }
+        empData.dates[file.date].files++
+        empData.dates[file.date].filesMeta.push(file)
+        empData.totalFiles++
       }
 
-      if (empData.files > 0) {
+      if (empData.totalFiles > 0) {
         monthData.employees[empId] = empData
-        monthData.totalFiles += empData.files
+        monthData.totalFiles += empData.totalFiles
+        scanData.totalFiles += empData.totalFiles
+        updateProgress({ filesFound: scanData.totalFiles })
       }
     }
 
     if (monthData.totalFiles > 0) {
-      result.months[month] = monthData
-      result.totalFiles += monthData.totalFiles
+      scanData.months[month] = monthData
     }
-
-    scannedMonths++
-    if (onProgress) onProgress({ scannedMonths, totalMonths: monthFolders.length, currentMonth: month })
   }
 
-  return result
+  // Recalculate totalFiles across all months (existing + newly scanned)
+  scanData.totalFiles = Object.values(scanData.months).reduce((s, m) => s + m.totalFiles, 0)
+
+  // Save merged result
+  await saveAttendanceScanResult(cityPath, scanData)
+  return scanData
 }
 
-export async function saveCleanupResult(cityPath, data) {
+export async function saveAttendanceScanResult(cityPath, data) {
   ensureStorage()
   const filePath = `${cityPath}/AttendanceManagement/cleanupScanResult.json`
-  console.log(`[Storage:saveCleanupResult] uploadString → ${filePath}`)
   const fileRef = storageRef(storage, filePath)
   await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
-  console.log(`[Storage:saveCleanupResult] Saved successfully`)
 }
 
-export async function loadCleanupResult(cityPath) {
+export async function loadAttendanceScanResult(cityPath) {
   ensureStorage()
   const path = `${cityPath}/AttendanceManagement/cleanupScanResult.json`
-  console.log(`[Storage:loadCleanupResult] getBytes → ${path}`)
   try {
     const fileRef = storageRef(storage, path)
-    const bytes = await getBytes(fileRef)
-    const text = new TextDecoder().decode(bytes)
-    const data = JSON.parse(text)
-    console.log(`[Storage:loadCleanupResult] Loaded. ${data.totalFiles} total files, ${Object.keys(data.months || {}).length} months`)
-    return data
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return await res.json()
   } catch {
-    console.log(`[Storage:loadCleanupResult] No cached result found`)
     return null
   }
 }
@@ -528,68 +569,127 @@ export async function getDutyOffDateFiles(cityPath, ward, year, month, date) {
 // ── SkipLine Scan ──
 // Structure: {city}/SkipData/{ward}/{year}/{month}/{date}/{images}
 
-export async function scanSkipLineImages(cityPath, onProgress, selectedWards) {
+/** List ward folders under {city}/SkipData */
+export async function listSkipLineWards(cityPath) {
   ensureStorage()
   const basePath = `${cityPath}/SkipData`
-  const wardsResult = await listAll(storageRef(storage, basePath))
-  const allWards = wardsResult.prefixes.map(p => p.name).sort()
-  const wardFolders = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+  const result = await listAll(storageRef(storage, basePath))
+  return result.prefixes.map(p => p.name).filter(n => n !== 'skipLineScanResult.json').sort()
+}
 
-  const result = {
+/** Scan selected wards (max 3) — stores filesMeta + URL, merges with existing */
+export async function scanSkipLineImages(cityPath, selectedWards, onProgress) {
+  ensureStorage()
+  const basePath = `${cityPath}/SkipData`
+
+  // Frozen: current + previous month
+  const now = new Date()
+  const curY = now.getFullYear()
+  const curM = now.getMonth() + 1
+  const prevM = curM === 1 ? 12 : curM - 1
+  const prevY = curM === 1 ? curY - 1 : curY
+  const MONTH_NUM = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
+
+  // Load existing to merge
+  const existing = await loadSkipLineScanResult(cityPath)
+  const scanData = {
     city: cityPath,
-    scannedAt: new Date().toISOString(),
+    scannedAt: now.toISOString(),
     totalFiles: 0,
-    wards: {},
+    wards: existing?.wards || {},
+  }
+  for (const ward of selectedWards) {
+    delete scanData.wards[ward]
   }
 
-  let scannedWards = 0
-  for (const ward of wardFolders) {
-    if (ward === 'skipLineScanResult.json') continue
+  let hitCount = 0
+  const progress = { ward: '', path: '', hits: 0, filesFound: 0, lastFile: '' }
+  const updateProgress = (updates) => {
+    Object.assign(progress, updates)
+    if (onProgress) onProgress({ ...progress })
+  }
+
+  for (const ward of selectedWards) {
+    updateProgress({ ward, path: `${ward}/...`, lastFile: '' })
     const wardData = { totalFiles: 0, years: {} }
 
+    hitCount++
+    updateProgress({ hits: hitCount })
     const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+
     for (const yearRef of yearsResult.prefixes) {
       const year = yearRef.name
-      const yearData = { totalFiles: 0, months: {} }
-
+      hitCount++
+      updateProgress({ hits: hitCount, path: `${ward}/${year}` })
       const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+
       for (const monthRef of monthsResult.prefixes) {
         const month = monthRef.name
+        const mNum = MONTH_NUM[month] || parseInt(month, 10) || 0
+        const yNum = parseInt(year)
+        if ((yNum === curY && mNum === curM) || (yNum === prevY && mNum === prevM)) continue
+
+        hitCount++
+        updateProgress({ hits: hitCount, path: `${ward}/${year}/${month}` })
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+
+        if (!wardData.years[year]) wardData.years[year] = { totalFiles: 0, months: {} }
         const monthData = { totalFiles: 0, dates: {} }
 
-        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
-        for (const dateRef of datesResult.prefixes) {
+        await Promise.all(datesResult.prefixes.map(async (dateRef) => {
           const date = dateRef.name
+          hitCount++
+          updateProgress({ hits: hitCount, path: `${ward}/${year}/${month}/${date}` })
           const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
-          const fileCount = filesResult.items.length
-          if (fileCount > 0) {
-            monthData.dates[date] = { files: fileCount }
-            monthData.totalFiles += fileCount
+
+          const filesMeta = await Promise.all(filesResult.items.map(async (item) => {
+            hitCount++
+            updateProgress({ hits: hitCount, lastFile: item.name, filesFound: scanData.totalFiles })
+            try {
+              const [meta, downloadUrl] = await Promise.all([
+                getMetadata(item),
+                getDownloadURL(item),
+              ])
+              return {
+                name: meta.name,
+                fullPath: meta.fullPath,
+                size: meta.size,
+                contentType: meta.contentType,
+                timeCreated: meta.timeCreated,
+                url: downloadUrl,
+              }
+            } catch {
+              return null
+            }
+          }))
+
+          const validFiles = filesMeta.filter(Boolean)
+          if (validFiles.length > 0) {
+            monthData.dates[date] = { files: validFiles.length, filesMeta: validFiles }
+            monthData.totalFiles += validFiles.length
+            scanData.totalFiles += validFiles.length
+            updateProgress({ filesFound: scanData.totalFiles })
           }
-        }
+        }))
 
         if (monthData.totalFiles > 0) {
-          yearData.months[month] = monthData
-          yearData.totalFiles += monthData.totalFiles
+          wardData.years[year].months[month] = monthData
+          wardData.years[year].totalFiles += monthData.totalFiles
         }
       }
 
-      if (yearData.totalFiles > 0) {
-        wardData.years[year] = yearData
-        wardData.totalFiles += yearData.totalFiles
-      }
+      if (!wardData.years[year] || wardData.years[year].totalFiles <= 0) delete wardData.years[year]
+      else wardData.totalFiles += wardData.years[year].totalFiles
     }
 
     if (wardData.totalFiles > 0) {
-      result.wards[ward] = wardData
-      result.totalFiles += wardData.totalFiles
+      scanData.wards[ward] = wardData
     }
-
-    scannedWards++
-    if (onProgress) onProgress({ scannedWards, totalWards: wardFolders.length, currentWard: ward })
   }
 
-  return result
+  scanData.totalFiles = Object.values(scanData.wards).reduce((s, w) => s + w.totalFiles, 0)
+  await saveSkipLineScanResult(cityPath, scanData)
+  return scanData
 }
 
 export async function saveSkipLineScanResult(cityPath, data) {
@@ -603,94 +703,162 @@ export async function loadSkipLineScanResult(cityPath) {
   ensureStorage()
   try {
     const fileRef = storageRef(storage, `${cityPath}/SkipData/skipLineScanResult.json`)
-    const bytes = await getBytes(fileRef)
-    const text = new TextDecoder().decode(bytes)
-    return JSON.parse(text)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return await res.json()
   } catch {
     return null
   }
 }
 
-export async function getSkipLineDateFiles(cityPath, ward, year, month, date) {
-  ensureStorage()
-  const basePath = `${cityPath}/SkipData/${ward}/${year}/${month}/${date}`
-  const result = await listAll(storageRef(storage, basePath))
-  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
-  return metas.map(m => ({
-    name: m.name,
-    fullPath: m.fullPath,
-    size: m.size,
-    contentType: m.contentType,
-    timeCreated: m.timeCreated,
-    updated: m.updated,
-  }))
-}
-
 // ── LogBook Scan ──
 // Structure: {city}/LogBookImages/{ward}/{year}/{month}/{date}/{images}
 
-export async function scanLogBookImages(cityPath, onProgress, selectedWards) {
+const LOGBOOK_CITY_CONFIG_PATH = 'Common/DeveloperTool/LogBookCityData.json'
+
+export async function loadLogBookCityConfig() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, LOGBOOK_CITY_CONFIG_PATH)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = await res.json()
+    return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
+  } catch {
+    return null
+  }
+}
+
+export async function saveLogBookCityConfig(cities, cleanedCities = []) {
+  ensureStorage()
+  const sorted = [...cities].sort((a, b) => a.localeCompare(b))
+  const cleanedSorted = [...cleanedCities].sort((a, b) => a.localeCompare(b))
+  const fileRef = storageRef(storage, LOGBOOK_CITY_CONFIG_PATH)
+  await uploadString(fileRef, JSON.stringify({ cities: sorted, cleanedCities: cleanedSorted }), 'raw', { contentType: 'application/json' })
+  return { cities: sorted, cleanedCities: cleanedSorted }
+}
+
+/** List ward folders under {city}/LogBookImages */
+export async function listLogBookWards(cityPath) {
   ensureStorage()
   const basePath = `${cityPath}/LogBookImages`
-  const wardsResult = await listAll(storageRef(storage, basePath))
-  const allWards = wardsResult.prefixes.map(p => p.name).sort()
-  const wardFolders = selectedWards ? allWards.filter(w => selectedWards.includes(w)) : allWards
+  const result = await listAll(storageRef(storage, basePath))
+  return result.prefixes.map(p => p.name).filter(n => n !== 'logBookScanResult.json').sort()
+}
 
-  const result = {
+/** Scan selected wards (max 3) — stores filesMeta + URL, merges with existing */
+export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
+  ensureStorage()
+  const basePath = `${cityPath}/LogBookImages`
+
+  const now = new Date()
+  const curY = now.getFullYear()
+  const curM = now.getMonth() + 1
+  const prevM = curM === 1 ? 12 : curM - 1
+  const prevY = curM === 1 ? curY - 1 : curY
+  const MONTH_NUM = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
+
+  const existing = await loadLogBookScanResult(cityPath)
+  const scanData = {
     city: cityPath,
-    scannedAt: new Date().toISOString(),
+    scannedAt: now.toISOString(),
     totalFiles: 0,
-    wards: {},
+    wards: existing?.wards || {},
+  }
+  for (const ward of selectedWards) {
+    delete scanData.wards[ward]
   }
 
-  let scannedWards = 0
-  for (const ward of wardFolders) {
-    if (ward === 'logBookScanResult.json') continue
+  let hitCount = 0
+  const progress = { ward: '', path: '', hits: 0, filesFound: 0, lastFile: '' }
+  const updateProgress = (updates) => {
+    Object.assign(progress, updates)
+    if (onProgress) onProgress({ ...progress })
+  }
+
+  for (const ward of selectedWards) {
+    updateProgress({ ward, path: `${ward}/...`, lastFile: '' })
     const wardData = { totalFiles: 0, years: {} }
 
+    hitCount++
+    updateProgress({ hits: hitCount })
     const yearsResult = await listAll(storageRef(storage, `${basePath}/${ward}`))
+
     for (const yearRef of yearsResult.prefixes) {
       const year = yearRef.name
-      const yearData = { totalFiles: 0, months: {} }
-
+      hitCount++
+      updateProgress({ hits: hitCount, path: `${ward}/${year}` })
       const monthsResult = await listAll(storageRef(storage, yearRef.fullPath))
+
       for (const monthRef of monthsResult.prefixes) {
         const month = monthRef.name
+        const mNum = MONTH_NUM[month] || parseInt(month, 10) || 0
+        const yNum = parseInt(year)
+        if ((yNum === curY && mNum === curM) || (yNum === prevY && mNum === prevM)) continue
+
+        hitCount++
+        updateProgress({ hits: hitCount, path: `${ward}/${year}/${month}` })
+        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
+
+        if (!wardData.years[year]) wardData.years[year] = { totalFiles: 0, months: {} }
         const monthData = { totalFiles: 0, dates: {} }
 
-        const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
-        for (const dateRef of datesResult.prefixes) {
+        await Promise.all(datesResult.prefixes.map(async (dateRef) => {
           const date = dateRef.name
+          hitCount++
+          updateProgress({ hits: hitCount, path: `${ward}/${year}/${month}/${date}` })
           const filesResult = await listAll(storageRef(storage, dateRef.fullPath))
-          const fileCount = filesResult.items.length
-          if (fileCount > 0) {
-            monthData.dates[date] = { files: fileCount }
-            monthData.totalFiles += fileCount
+
+          const filesMeta = await Promise.all(filesResult.items.map(async (item) => {
+            hitCount++
+            updateProgress({ hits: hitCount, lastFile: item.name, filesFound: scanData.totalFiles })
+            try {
+              const [meta, downloadUrl] = await Promise.all([
+                getMetadata(item),
+                getDownloadURL(item),
+              ])
+              return {
+                name: meta.name,
+                fullPath: meta.fullPath,
+                size: meta.size,
+                contentType: meta.contentType,
+                timeCreated: meta.timeCreated,
+                url: downloadUrl,
+              }
+            } catch {
+              return null
+            }
+          }))
+
+          const validFiles = filesMeta.filter(Boolean)
+          if (validFiles.length > 0) {
+            monthData.dates[date] = { files: validFiles.length, filesMeta: validFiles }
+            monthData.totalFiles += validFiles.length
+            scanData.totalFiles += validFiles.length
+            updateProgress({ filesFound: scanData.totalFiles })
           }
-        }
+        }))
 
         if (monthData.totalFiles > 0) {
-          yearData.months[month] = monthData
-          yearData.totalFiles += monthData.totalFiles
+          wardData.years[year].months[month] = monthData
+          wardData.years[year].totalFiles += monthData.totalFiles
         }
       }
 
-      if (yearData.totalFiles > 0) {
-        wardData.years[year] = yearData
-        wardData.totalFiles += yearData.totalFiles
-      }
+      if (!wardData.years[year] || wardData.years[year].totalFiles <= 0) delete wardData.years[year]
+      else wardData.totalFiles += wardData.years[year].totalFiles
     }
 
     if (wardData.totalFiles > 0) {
-      result.wards[ward] = wardData
-      result.totalFiles += wardData.totalFiles
+      scanData.wards[ward] = wardData
     }
-
-    scannedWards++
-    if (onProgress) onProgress({ scannedWards, totalWards: wardFolders.length, currentWard: ward })
   }
 
-  return result
+  scanData.totalFiles = Object.values(scanData.wards).reduce((s, w) => s + w.totalFiles, 0)
+  await saveLogBookScanResult(cityPath, scanData)
+  return scanData
 }
 
 export async function saveLogBookScanResult(cityPath, data) {
@@ -704,27 +872,13 @@ export async function loadLogBookScanResult(cityPath) {
   ensureStorage()
   try {
     const fileRef = storageRef(storage, `${cityPath}/LogBookImages/logBookScanResult.json`)
-    const bytes = await getBytes(fileRef)
-    const text = new TextDecoder().decode(bytes)
-    return JSON.parse(text)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    return await res.json()
   } catch {
     return null
   }
-}
-
-export async function getLogBookDateFiles(cityPath, ward, year, month, date) {
-  ensureStorage()
-  const basePath = `${cityPath}/LogBookImages/${ward}/${year}/${month}/${date}`
-  const result = await listAll(storageRef(storage, basePath))
-  const metas = await Promise.all(result.items.map(f => getMetadata(f)))
-  return metas.map(m => ({
-    name: m.name,
-    fullPath: m.fullPath,
-    size: m.size,
-    contentType: m.contentType,
-    timeCreated: m.timeCreated,
-    updated: m.updated,
-  }))
 }
 
 // ── DutyOnOff Combined Scan ──
@@ -895,6 +1049,7 @@ export async function getDutyOnOffDateFiles(cityPath, ward, year, month, date) {
 
 // ── DutyOnOff City Config (stored in Firebase Storage) ──
 const CITY_CONFIG_PATH = 'Common/DeveloperTool/DutyOnOffCityData.json'
+const ATTENDANCE_CITY_CONFIG_PATH = 'Common/DeveloperTool/AttendanceCityData.json'
 
 export async function loadDutyOnOffCityConfig() {
   ensureStorage()
@@ -915,6 +1070,54 @@ export async function saveDutyOnOffCityConfig(cities, cleanedCities = []) {
   const sorted = [...cities].sort((a, b) => a.localeCompare(b))
   const cleanedSorted = [...cleanedCities].sort((a, b) => a.localeCompare(b))
   const fileRef = storageRef(storage, CITY_CONFIG_PATH)
+  await uploadString(fileRef, JSON.stringify({ cities: sorted, cleanedCities: cleanedSorted }), 'raw', { contentType: 'application/json' })
+  return { cities: sorted, cleanedCities: cleanedSorted }
+}
+
+export async function loadAttendanceCityConfig() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, ATTENDANCE_CITY_CONFIG_PATH)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = await res.json()
+    return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
+  } catch {
+    return null
+  }
+}
+
+export async function saveAttendanceCityConfig(cities, cleanedCities = []) {
+  ensureStorage()
+  const sorted = [...cities].sort((a, b) => a.localeCompare(b))
+  const cleanedSorted = [...cleanedCities].sort((a, b) => a.localeCompare(b))
+  const fileRef = storageRef(storage, ATTENDANCE_CITY_CONFIG_PATH)
+  await uploadString(fileRef, JSON.stringify({ cities: sorted, cleanedCities: cleanedSorted }), 'raw', { contentType: 'application/json' })
+  return { cities: sorted, cleanedCities: cleanedSorted }
+}
+
+const SKIPLINE_CITY_CONFIG_PATH = 'Common/DeveloperTool/SkipLineCityData.json'
+
+export async function loadSkipLineCityConfig() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, SKIPLINE_CITY_CONFIG_PATH)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url)
+    if (!res.ok) return null
+    const data = await res.json()
+    return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
+  } catch {
+    return null
+  }
+}
+
+export async function saveSkipLineCityConfig(cities, cleanedCities = []) {
+  ensureStorage()
+  const sorted = [...cities].sort((a, b) => a.localeCompare(b))
+  const cleanedSorted = [...cleanedCities].sort((a, b) => a.localeCompare(b))
+  const fileRef = storageRef(storage, SKIPLINE_CITY_CONFIG_PATH)
   await uploadString(fileRef, JSON.stringify({ cities: sorted, cleanedCities: cleanedSorted }), 'raw', { contentType: 'application/json' })
   return { cities: sorted, cleanedCities: cleanedSorted }
 }

@@ -1,98 +1,91 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, FileImage, Eye, EyeOff, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
-import { getFileDownloadURL, scanSkipLineImages, saveSkipLineScanResult, loadSkipLineScanResult, getSkipLineDateFiles, deleteStorageFiles, listStorageFolders } from '../../lib/firebase'
+import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
+import { deleteStorageFiles, listSkipLineWards, scanSkipLineImages, saveSkipLineScanResult, loadSkipLineScanResult, loadSkipLineCityConfig } from '../../lib/firebase'
 import { formatSize } from './utils'
+import CitySelector from '../CitySelector'
+import { getCachedSectionConfig, cacheSectionConfig } from '../../lib/sectionConfig'
 
-export default function SkipLineSection({ selectedCity }) {
+export default function SkipLineSection() {
+  // City selection
+  const cached = getCachedSectionConfig('skipLine')
+  const activeCities0 = cached.cities.filter(c => !cached.cleanedCities.includes(c))
+  const [slCities, setSlCities] = useState(activeCities0)
+  const [selectedCity, setSelectedCity] = useState(activeCities0[0] || null)
+
+  useEffect(() => {
+    const refresh = async () => {
+      try {
+        const remote = await loadSkipLineCityConfig()
+        if (remote) {
+          const active = remote.cities.filter(c => !remote.cleanedCities.includes(c))
+          setSlCities(prev => JSON.stringify(prev) === JSON.stringify(active) ? prev : active)
+          cacheSectionConfig('skipLine', remote.cities, remote.cleanedCities)
+        }
+      } catch (err) {
+        console.warn('Could not load skip line cities:', err.message)
+      }
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [])
+
+  // Scan state
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState(null)
   const [scanResult, setScanResult] = useState(null)
   const [loadingScanResult, setLoadingScanResult] = useState(true)
 
+  // Navigation
   const [selectedWard, setSelectedWard] = useState(null)
   const [selectedYear, setSelectedYear] = useState(null)
   const [selectedMonth, setSelectedMonth] = useState(null)
+
+  // Files from scanResult JSON (zero Firebase calls)
   const [allDateFiles, setAllDateFiles] = useState({})
-  const [loadingFiles, setLoadingFiles] = useState(false)
-  const [showImages, setShowImages] = useState(false)
-  const [imageUrls, setImageUrls] = useState({})
-  const [loadingImages, setLoadingImages] = useState(false)
   const [selectedFiles, setSelectedFiles] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
+
+  // Ward picker
   const [showRescanModal, setShowRescanModal] = useState(false)
   const [showWardPicker, setShowWardPicker] = useState(false)
   const [availableWards, setAvailableWards] = useState([])
   const [pickedWards, setPickedWards] = useState(new Set())
   const [loadingWards, setLoadingWards] = useState(false)
+
+  // Timer
   const [elapsedTime, setElapsedTime] = useState(0)
   const timerRef = useRef(null)
 
-  const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December']
-  const frozenYearMonths = (() => {
-    const now = new Date()
-    const y = now.getFullYear()
-    const m = now.getMonth() + 1
-    const pairs = []
-    for (let i = 0; i < 2; i++) {
-      let mo = m - i, yr = y
-      if (mo <= 0) { mo += 12; yr -= 1 }
-      pairs.push({ year: String(yr), month: mo })
-    }
-    return pairs
-  })()
-
-  function monthToNumber(monthStr) {
-    const num = parseInt(monthStr, 10)
-    if (!isNaN(num)) return num
-    const idx = MONTH_NAMES.findIndex(n => n.toLowerCase() === monthStr.toLowerCase())
-    return idx >= 0 ? idx + 1 : -1
-  }
-
-  function isFrozenMonth(year, month) {
-    const mo = monthToNumber(month)
-    return frozenYearMonths.some(f => f.year === String(year) && f.month === mo)
-  }
-
-  function filterScanResult(raw) {
-    if (!raw || !raw.wards) return raw
-    const result = JSON.parse(JSON.stringify(raw))
-    result.totalFiles = 0
-    for (const [wardName, wardData] of Object.entries(result.wards)) {
-      wardData.totalFiles = 0
-      for (const [year, yearData] of Object.entries(wardData.years)) {
-        yearData.totalFiles = 0
-        for (const month of Object.keys(yearData.months)) {
-          if (isFrozenMonth(year, month)) {
-            delete yearData.months[month]
-          } else {
-            yearData.totalFiles += yearData.months[month].totalFiles
-          }
-        }
-        if (yearData.totalFiles <= 0) delete wardData.years[year]
-        else wardData.totalFiles += yearData.totalFiles
-      }
-      if (wardData.totalFiles <= 0) delete result.wards[wardName]
-      else result.totalFiles += wardData.totalFiles
-    }
-    return result
-  }
-
+  // Derived
   const wardList = scanResult
     ? Object.keys(scanResult.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     : []
 
-  const yearList = (scanResult && selectedWard && scanResult.wards[selectedWard]?.years)
-    ? Object.keys(scanResult.wards[selectedWard].years).sort()
-    : []
+  const MONTH_ORDER = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
 
-  const monthList = (scanResult && selectedWard && selectedYear && scanResult.wards[selectedWard]?.years[selectedYear]?.months)
-    ? Object.keys(scanResult.wards[selectedWard].years[selectedYear].months).sort()
-    : []
+  const yearMonthList = (() => {
+    if (!scanResult || !selectedWard || !scanResult.wards[selectedWard]?.years) return []
+    const list = []
+    for (const [year, yearData] of Object.entries(scanResult.wards[selectedWard].years)) {
+      for (const [month, monthData] of Object.entries(yearData.months)) {
+        list.push({ year, month, totalFiles: monthData.totalFiles, key: `${year}-${month}` })
+      }
+    }
+    return list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_ORDER[b.month] || 0) - (MONTH_ORDER[a.month] || 0))
+  })()
 
-  const dateList = (scanResult && selectedWard && selectedYear && selectedMonth && scanResult.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]?.dates)
+  const selectedYearMonth = selectedYear && selectedMonth ? `${selectedYear}-${selectedMonth}` : null
+
+  const dateList = (scanResult && selectedWard && selectedYear && selectedMonth &&
+    scanResult.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]?.dates)
     ? Object.entries(scanResult.wards[selectedWard].years[selectedYear].months[selectedMonth].dates)
         .sort(([a], [b]) => a.localeCompare(b))
     : []
+
+  const allFiles = Object.values(allDateFiles).flat()
+
+  // ── Ward Picker ──
 
   const openWardPicker = async () => {
     setLoadingWards(true)
@@ -100,7 +93,7 @@ export default function SkipLineSection({ selectedCity }) {
     setShowWardPicker(true)
     setPickedWards(new Set())
     try {
-      const folders = await listStorageFolders(`${selectedCity}/SkipData`)
+      const folders = await listSkipLineWards(selectedCity)
       setAvailableWards(folders)
     } catch {
       setAvailableWards([])
@@ -111,8 +104,8 @@ export default function SkipLineSection({ selectedCity }) {
   const toggleWard = (ward) => {
     setPickedWards(prev => {
       const next = new Set(prev)
-      if (next.has(ward)) { next.delete(ward) }
-      else if (next.size < 3) { next.add(ward) }
+      if (next.has(ward)) next.delete(ward)
+      else if (next.size < 3) next.add(ward)
       return next
     })
   }
@@ -127,7 +120,7 @@ export default function SkipLineSection({ selectedCity }) {
         <div className="flex flex-col gap-4">
           <div>
             <h3 className="text-lg font-bold text-gray-900 mb-1">Select Wards to Scan</h3>
-            <p className="text-xs text-gray-500">Choose up to <span className="font-semibold text-cyan-600">3 wards</span> at a time to scan.</p>
+            <p className="text-xs text-gray-500">Choose up to <span className="font-semibold text-cyan-600">3 wards</span> at a time.</p>
           </div>
           {loadingWards ? (
             <div className="flex items-center justify-center py-8"><Loader2 size={20} className="animate-spin text-cyan-500" /><span className="text-sm text-text-muted ml-2">Loading wards...</span></div>
@@ -163,6 +156,8 @@ export default function SkipLineSection({ selectedCity }) {
     </div>
   )
 
+  // ── Handlers ──
+
   function formatElapsed(seconds) {
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
@@ -179,40 +174,18 @@ export default function SkipLineSection({ selectedCity }) {
     setElapsedTime(0)
     timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000)
     try {
-      const wardsToScan = wards && wards.length > 0 ? wards : null
-      const rawResult = await scanSkipLineImages(selectedCity, (progress) => {
+      const result = await scanSkipLineImages(selectedCity, wards, (progress) => {
         setScanProgress(progress)
-      }, wardsToScan)
-
-      let finalRaw = rawResult
-      if (wardsToScan && scanResult) {
-        const existing = JSON.parse(JSON.stringify(scanResult))
-        for (const [w, wd] of Object.entries(rawResult.wards)) {
-          existing.wards[w] = wd
-        }
-        existing.totalFiles = Object.values(existing.wards).reduce((s, w) => s + w.totalFiles, 0)
-        existing.scannedAt = rawResult.scannedAt
-        finalRaw = existing
-      }
-
-      await saveSkipLineScanResult(selectedCity, finalRaw)
-      const result = filterScanResult(finalRaw)
+      })
       setScanResult(result)
-      if (Object.keys(result.wards).length > 0) {
-        const firstWard = Object.keys(result.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
-        setSelectedWard(firstWard)
-        setSelectedYear(null)
-        setSelectedMonth(null)
-        setAllDateFiles({})
-      }
+      const firstWard = Object.keys(result.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+      if (firstWard) setSelectedWard(firstWard)
     } catch {
       alert('Scan failed. Please try again.')
     }
     clearInterval(timerRef.current)
     setScanning(false)
   }
-
-  const allFiles = Object.values(allDateFiles).flat()
 
   const handleDeleteSelected = async () => {
     if (selectedFiles.size === 0) return
@@ -222,7 +195,6 @@ export default function SkipLineSection({ selectedCity }) {
     try {
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
       const failedSet = new Set(failed)
-      const deletedCount = deleted
 
       setAllDateFiles(prev => {
         const next = {}
@@ -233,21 +205,22 @@ export default function SkipLineSection({ selectedCity }) {
       })
       setSelectedFiles(new Set(failed))
 
-      if (scanResult && selectedWard && selectedYear && selectedMonth && deletedCount > 0) {
+      if (scanResult && selectedWard && selectedYear && selectedMonth && deleted > 0) {
         const next = JSON.parse(JSON.stringify(scanResult))
         const monthData = next.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]
         if (monthData) {
+          const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
           for (const [date, dateData] of Object.entries(monthData.dates || {})) {
-            const dateFiles = allDateFiles[date] || []
-            const deletedInDate = dateFiles.filter(f => selectedFiles.has(f.fullPath) && !failedSet.has(f.fullPath)).length
-            dateData.files -= deletedInDate
+            if (dateData.filesMeta) {
+              dateData.filesMeta = dateData.filesMeta.filter(f => !deletedPaths.has(f.fullPath))
+            }
+            dateData.files = dateData.filesMeta?.length || 0
             if (dateData.files <= 0) delete monthData.dates[date]
           }
           monthData.totalFiles = Object.values(monthData.dates || {}).reduce((s, d) => s + d.files, 0)
-          if (monthData.totalFiles <= 0) {
-            delete next.wards[selectedWard].years[selectedYear].months[selectedMonth]
-          }
-          const yearData = next.wards[selectedWard].years[selectedYear]
+          if (monthData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear].months[selectedMonth]
+
+          const yearData = next.wards[selectedWard]?.years[selectedYear]
           if (yearData) {
             yearData.totalFiles = Object.values(yearData.months || {}).reduce((s, m) => s + m.totalFiles, 0)
             if (yearData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear]
@@ -282,8 +255,10 @@ export default function SkipLineSection({ selectedCity }) {
     return `${Math.floor(hrs / 24)}d ago`
   }
 
+  // ── Effects ──
+
   useEffect(() => {
-    if (!selectedCity) return
+    if (!selectedCity) { setLoadingScanResult(false); return }
     setLoadingScanResult(true)
     setScanResult(null)
     setSelectedWard(null)
@@ -292,77 +267,42 @@ export default function SkipLineSection({ selectedCity }) {
     setAllDateFiles({})
     loadSkipLineScanResult(selectedCity).then(cached => {
       if (cached) {
-        const filtered = filterScanResult(cached)
-        setScanResult(filtered)
-        const firstWard = Object.keys(filtered.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+        setScanResult(cached)
+        const firstWard = Object.keys(cached.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
         if (firstWard) setSelectedWard(firstWard)
       }
     }).finally(() => setLoadingScanResult(false))
   }, [selectedCity])
 
+  // Auto-select first year-month when ward changes
   useEffect(() => {
-    if (yearList.length > 0 && !yearList.includes(selectedYear)) {
-      setSelectedYear(yearList[0])
-      setSelectedMonth(null)
+    if (yearMonthList.length > 0 && !selectedYearMonth) {
+      setSelectedYear(yearMonthList[0].year)
+      setSelectedMonth(yearMonthList[0].month)
       setAllDateFiles({})
     }
-  }, [selectedWard])
+  }, [selectedWard, yearMonthList.length])
 
+  // Load files from scanResult JSON — zero Firebase calls
   useEffect(() => {
-    if (monthList.length > 0 && !monthList.includes(selectedMonth)) {
-      setSelectedMonth(monthList[0])
-      setAllDateFiles({})
-    }
-  }, [selectedYear, monthList.length])
-
-  useEffect(() => {
-    if (!selectedCity || !selectedWard || !selectedYear || !selectedMonth) {
+    if (!selectedCity || !selectedWard || !selectedYear || !selectedMonth || !scanResult) {
       setAllDateFiles({})
       return
     }
-    let cancelled = false
-    setLoadingFiles(true)
-    setImageUrls({})
     setSelectedFiles(new Set())
-    const dates = dateList.map(([date]) => date)
-    Promise.all(
-      dates.map(date =>
-        getSkipLineDateFiles(selectedCity, selectedWard, selectedYear, selectedMonth, date)
-          .then(files => ({ date, files }))
-          .catch(() => ({ date, files: [] }))
-      )
-    ).then(results => {
-      if (cancelled) return
-      const map = {}
-      results.forEach(r => { map[r.date] = r.files })
-      setAllDateFiles(map)
-    }).finally(() => { if (!cancelled) setLoadingFiles(false) })
-    return () => { cancelled = true }
-  }, [selectedCity, selectedWard, selectedYear, selectedMonth])
+    const monthData = scanResult.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]
+    if (!monthData?.dates) {
+      setAllDateFiles({})
+      return
+    }
+    const map = {}
+    for (const [date, dateData] of Object.entries(monthData.dates)) {
+      map[date] = dateData.filesMeta || []
+    }
+    setAllDateFiles(map)
+  }, [selectedCity, selectedWard, selectedYear, selectedMonth, scanResult])
 
-  useEffect(() => {
-    const allFiles = Object.values(allDateFiles).flat()
-    if (!showImages || allFiles.length === 0) return
-    const toFetch = allFiles.filter(f => !imageUrls[f.fullPath])
-    if (toFetch.length === 0) return
-    let cancelled = false
-    setLoadingImages(true)
-    Promise.all(
-      toFetch.map(f =>
-        getFileDownloadURL(f.fullPath)
-          .then(url => ({ path: f.fullPath, url }))
-          .catch(() => ({ path: f.fullPath, url: null }))
-      )
-    ).then(results => {
-      if (cancelled) return
-      setImageUrls(prev => {
-        const next = { ...prev }
-        results.forEach(r => { next[r.path] = r.url })
-        return next
-      })
-    }).finally(() => { if (!cancelled) setLoadingImages(false) })
-    return () => { cancelled = true }
-  }, [showImages, allDateFiles])
+  // ── Render ──
 
   if (loadingScanResult) {
     return (
@@ -376,12 +316,13 @@ export default function SkipLineSection({ selectedCity }) {
     return (
       <>
       <div className="flex flex-col items-center justify-center h-full gap-4">
+        <CitySelector cities={slCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         <div className="w-16 h-16 rounded-2xl bg-cyan-500/10 flex items-center justify-center">
           <Search size={28} className="text-cyan-500" />
         </div>
         <div className="text-center">
-          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data for {selectedCity}</h3>
-          <p className="text-xs text-text-muted mb-4">Scan Skip Line folders to see stored images</p>
+          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data</h3>
+          <p className="text-xs text-text-muted mb-1">Scan skip line folders to find old files for cleanup</p>
         </div>
         <button
           onClick={openWardPicker}
@@ -399,24 +340,30 @@ export default function SkipLineSection({ selectedCity }) {
   if (scanning) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Loader2 size={32} className="animate-spin text-cyan-500" />
-        <span className="text-sm font-medium text-cyan-700">
-          Scanning {scanProgress?.currentWard || '...'}
-        </span>
-        {scanProgress && (
-          <>
-            <span className="text-xs text-text-muted">{scanProgress.scannedWards}/{scanProgress.totalWards} wards</span>
-            <div className="w-72 h-2 bg-cyan-200 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-cyan-500 rounded-full transition-all duration-300"
-                style={{ width: `${(scanProgress.scannedWards / scanProgress.totalWards) * 100}%` }}
-              />
-            </div>
-          </>
+        <Loader2 size={28} className="animate-spin text-cyan-500" />
+
+        {scanProgress?.ward && (
+          <div className="text-center">
+            <span className="text-xs text-text-muted">Ward</span>
+            <span className="text-sm font-bold text-cyan-600 ml-1.5">{scanProgress.ward}</span>
+          </div>
         )}
-        <div className="flex items-center gap-1.5 text-xs text-text-muted mt-1">
-          <Clock size={12} />
-          <span>Elapsed: <span className="font-semibold text-cyan-700">{formatElapsed(elapsedTime)}</span></span>
+
+        <div className="flex items-center gap-4 text-[11px]">
+          <div className="flex items-center gap-1.5 text-text-muted">
+            <Clock size={12} />
+            <span className="font-semibold text-cyan-700">{formatElapsed(elapsedTime)}</span>
+          </div>
+          {scanProgress?.filesFound > 0 && (
+            <span className="text-text-muted">
+              <span className="font-bold text-emerald-600">{scanProgress.filesFound}</span> files
+            </span>
+          )}
+          {scanProgress?.hits > 0 && (
+            <span className="text-text-muted">
+              <span className="font-bold text-sky-600">{scanProgress.hits}</span> API hits
+            </span>
+          )}
         </div>
       </div>
     )
@@ -425,19 +372,20 @@ export default function SkipLineSection({ selectedCity }) {
   return (
     <>
     <div className="h-full p-[1px] rounded-xl relative overflow-hidden" style={{
-      background: 'conic-gradient(from var(--border-angle, 0deg), #818cf8, #a78bfa, #f472b6, #818cf8)',
+      background: 'conic-gradient(from var(--border-angle, 0deg), #06b6d4, #14b8a6, #22d3ee, #06b6d4)',
       animation: 'spin-border 3s linear infinite'
     }}>
     <style>{`@keyframes spin-border { to { --border-angle: 360deg; } } @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }`}</style>
     <div className="flex flex-col h-full rounded-[10px] overflow-hidden bg-white">
+      {/* Top strip */}
       <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
         <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-text">{selectedCity} — Skip Line Images</h3>
+          <h3 className="text-sm font-semibold text-text">Skip Line</h3>
           <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-cyan-500/10 text-cyan-600 border border-cyan-500/20">
             {scanResult.totalFiles} files
           </span>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           {scanResult.scannedAt && (
             <span className="text-[9px] text-text-muted">{timeAgo(scanResult.scannedAt)}</span>
           )}
@@ -448,103 +396,71 @@ export default function SkipLineSection({ selectedCity }) {
             <RefreshCw size={12} />
             Re Scan
           </button>
+          <div className="w-px h-5 bg-surface-lighter" />
+          <CitySelector cities={slCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         </div>
       </div>
 
+      {/* Body */}
       <div className="flex flex-1 min-h-0">
-      <div className="w-22 shrink-0 border-r border-surface-lighter flex flex-col bg-gray-100">
-        <div className="flex-1 overflow-y-auto">
-          {wardList.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-text-muted text-xs">No wards</div>
-          ) : (
-            <div className="flex flex-col">
-              {wardList.map((ward, idx) => {
-                const isSelected = selectedWard === ward
-                return (
-                  <div key={ward}>
-                    {idx > 0 && <hr className="border-surface-lighter" />}
-                    <button
-                      onClick={() => { setSelectedWard(ward); setSelectedYear(null); setSelectedMonth(null); setAllDateFiles({}) }}
-                      className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer ${
-                        isSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
-                      }`}
-                    >
-                      <div className={`text-[11px] font-semibold truncate ${isSelected ? 'text-gray-800' : 'text-text'}`}>
-                        {ward}
-                      </div>
-                    </button>
-                  </div>
-                )
-              })}
-            </div>
-          )}
+        {/* Left: Ward list */}
+        <div className="w-22 shrink-0 border-r border-surface-lighter flex flex-col bg-gray-100">
+          <div className="flex-1 overflow-y-auto">
+            {wardList.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-text-muted text-xs">No wards</div>
+            ) : (
+              <div className="flex flex-col">
+                {wardList.map((ward, idx) => {
+                  const isSelected = selectedWard === ward
+                  return (
+                    <div key={ward}>
+                      {idx > 0 && <hr className="border-surface-lighter" />}
+                      <button
+                        onClick={() => { setSelectedWard(ward); setSelectedYear(null); setSelectedMonth(null); setAllDateFiles({}) }}
+                        className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer ${
+                          isSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
+                        }`}
+                      >
+                        <div className={`text-[11px] font-semibold truncate ${isSelected ? 'text-gray-800' : 'text-text'}`}>
+                          {ward}
+                        </div>
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
 
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-        {!selectedWard ? (
-          <div className="flex items-center justify-center h-full text-text-muted text-sm">Select a ward</div>
-        ) : !scanResult.wards[selectedWard] ? (
-          <div className="flex items-center justify-center h-full text-text-muted text-sm">No data for this ward</div>
-        ) : (
-          <>
-            <div className="px-4 pt-3 space-y-3">
-              {yearList.length > 0 && !selectedYear && (
-                <div>
-                  <h4 className="text-xs font-semibold text-text mb-2">{selectedWard} — Years</h4>
-                  <div className="grid grid-cols-3 gap-2">
-                    {yearList.map(yr => {
-                      const yd = scanResult.wards[selectedWard].years[yr]
-                      const monthCount = Object.keys(yd.months).length
-                      return (
-                        <button
-                          key={yr}
-                          onClick={() => { setSelectedYear(yr); setSelectedMonth(null); setAllDateFiles({}) }}
-                          className="flex flex-col items-center gap-1 p-3 rounded-xl border border-cyan-200/60 bg-gradient-to-br from-cyan-50 to-sky-50 hover:border-cyan-400 hover:shadow-md transition-all cursor-pointer group"
-                        >
-                          <span className="text-lg font-bold text-cyan-700 group-hover:text-cyan-800">{yr}</span>
-                          <span className="text-[10px] font-medium text-cyan-600">{yd.totalFiles} files</span>
-                          <span className="text-[9px] text-text-muted">{monthCount} month{monthCount !== 1 ? 's' : ''}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {selectedYear && (
+        {/* Right: Content */}
+        <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+          {!selectedWard ? (
+            <div className="flex items-center justify-center h-full text-text-muted text-sm">Select a ward</div>
+          ) : !scanResult.wards[selectedWard] ? (
+            <div className="flex items-center justify-center h-full text-text-muted text-sm">No data for this ward</div>
+          ) : (
+            <>
+              <div className="px-4 pt-3 space-y-3">
+                {/* Year-Month pills */}
                 <div className="flex items-center gap-2 flex-wrap">
-                  <button
-                    onClick={() => { setSelectedYear(null); setSelectedMonth(null); setAllDateFiles({}) }}
-                    className="text-[10px] font-semibold text-cyan-600 hover:text-cyan-800 transition-colors cursor-pointer"
-                  >
-                    {selectedWard}
-                  </button>
-                  <span className="text-[10px] text-text-muted">/</span>
-                  <span className="text-[10px] font-bold text-text">{selectedYear}</span>
-                  <span className="text-[9px] text-text-muted">({scanResult.wards[selectedWard].years[selectedYear].totalFiles} files)</span>
-                  {monthList.length > 0 && (
-                    <>
-                      <span className="text-[10px] text-text-muted mx-1">|</span>
-                      {monthList.map(mo => {
-                        const md = scanResult.wards[selectedWard].years[selectedYear].months[mo]
-                        return (
-                          <button
-                            key={mo}
-                            onClick={() => { setSelectedMonth(selectedMonth === mo ? null : mo); setAllDateFiles({}) }}
-                            className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
-                              selectedMonth === mo ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
-                            }`}
-                          >
-                            {mo} ({md.totalFiles})
-                          </button>
-                        )
-                      })}
-                    </>
-                  )}
+                  {yearMonthList.map(ym => {
+                    const isActive = selectedYearMonth === ym.key
+                    return (
+                      <button
+                        key={ym.key}
+                        onClick={() => { setSelectedYear(ym.year); setSelectedMonth(ym.month); setAllDateFiles({}) }}
+                        className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
+                          isActive ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
+                        }`}
+                      >
+                        {ym.month} {ym.year} ({ym.totalFiles})
+                      </button>
+                    )
+                  })}
                   {selectedMonth && Object.keys(allDateFiles).length > 0 && (
                     <span className="text-[9px] text-text-muted">
-                      · {formatSize(Object.values(allDateFiles).flat().reduce((s, f) => s + f.size, 0))}
+                      · {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}
                     </span>
                   )}
                   <div className="flex items-center gap-1.5 ml-auto">
@@ -558,24 +474,11 @@ export default function SkipLineSection({ selectedCity }) {
                         {deleting ? 'Deleting...' : `Delete (${selectedFiles.size})`}
                       </button>
                     )}
-                    <button
-                      onClick={() => setShowImages(prev => !prev)}
-                      className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                        showImages ? 'bg-primary text-white' : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
-                      }`}
-                    >
-                      {showImages ? <Eye size={13} /> : <EyeOff size={13} />}
-                      {showImages ? 'Images ON' : 'Images OFF'}
-                      {loadingImages && <Loader2 size={12} className="animate-spin ml-0.5" />}
-                    </button>
                     {allFiles.length > 0 && (
                       <button
                         onClick={() => {
-                          if (selectedFiles.size === allFiles.length) {
-                            setSelectedFiles(new Set())
-                          } else {
-                            setSelectedFiles(new Set(allFiles.map(f => f.fullPath)))
-                          }
+                          if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set())
+                          else setSelectedFiles(new Set(allFiles.map(f => f.fullPath)))
                         }}
                         className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
                           selectedFiles.size === allFiles.length && allFiles.length > 0
@@ -588,149 +491,122 @@ export default function SkipLineSection({ selectedCity }) {
                     )}
                   </div>
                 </div>
-              )}
-            </div>
+              </div>
 
-            {selectedYear && selectedMonth ? (
-              <div className="flex-1 overflow-y-auto mt-3 border-t border-surface-lighter p-4">
-                {dateList.length === 0 ? (
-                  <div className="flex items-center justify-center h-32 text-text-muted text-xs">No dates found</div>
-                ) : (
-                  <div>
-                    {loadingFiles ? (
-                      <div className="flex items-center justify-center py-8">
-                        <Loader2 size={18} className="animate-spin text-primary" />
-                        <span className="text-xs text-text-muted ml-2">Loading files...</span>
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-8 gap-2">
-                        {dateList.map(([date, info]) => {
-                          const files = allDateFiles[date] || []
-                          return (
-                            <div key={date} className="rounded-[5px] border border-surface-lighter overflow-hidden">
-                              <div className="px-2 py-1.5 flex items-center justify-between bg-gray-100">
+              {/* Date cards grid */}
+              {selectedYear && selectedMonth ? (
+                <div className="flex-1 overflow-y-auto mt-3 border-t border-surface-lighter p-4">
+                  {dateList.length === 0 ? (
+                    <div className="flex items-center justify-center h-32 text-text-muted text-xs">No dates found</div>
+                  ) : (
+                    <div className="grid grid-cols-5 gap-2">
+                      {dateList.map(([date]) => {
+                        const files = allDateFiles[date] || []
+                        return (
+                          <div key={date} className="rounded-[5px] border border-surface-lighter overflow-hidden">
+                            <div className="px-2 py-1.5 flex items-center justify-between bg-gray-100">
+                              <div className="flex items-center gap-1.5">
+                                <Calendar size={12} className="text-gray-500" />
+                                <span className="text-[10px] font-semibold text-gray-700">{date}</span>
+                              </div>
+                              {files.length > 0 && (
                                 <div className="flex items-center gap-1.5">
-                                  <Calendar size={12} className="text-gray-500" />
-                                  <span className="text-[10px] font-semibold text-gray-700">{date}</span>
-                                </div>
-                                {files.length > 0 && (
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="text-[8px] text-gray-500">
-                                      {formatSize(files.reduce((s, f) => s + f.size, 0))}
-                                    </span>
-                                    <input
-                                      type="checkbox"
-                                      className="w-3 h-3 rounded accent-primary cursor-pointer"
-                                      checked={files.every(f => selectedFiles.has(f.fullPath))}
-                                      onChange={(e) => {
-                                        setSelectedFiles(prev => {
-                                          const next = new Set(prev)
-                                          files.forEach(f => {
-                                            if (e.target.checked) next.add(f.fullPath)
-                                            else next.delete(f.fullPath)
-                                          })
-                                          return next
+                                  <span className="text-[8px] text-gray-500">
+                                    {formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}
+                                  </span>
+                                  <input
+                                    type="checkbox"
+                                    className="w-3 h-3 rounded accent-primary cursor-pointer"
+                                    checked={files.every(f => selectedFiles.has(f.fullPath))}
+                                    onChange={(e) => {
+                                      setSelectedFiles(prev => {
+                                        const next = new Set(prev)
+                                        files.forEach(f => {
+                                          if (e.target.checked) next.add(f.fullPath)
+                                          else next.delete(f.fullPath)
                                         })
-                                      }}
-                                    />
-                                  </div>
-                                )}
-                              </div>
-                              <div className="p-2 bg-white">
-                                {files.length === 0 ? (
-                                  <div className="text-center py-1 text-text-muted text-[9px]">No files</div>
-                                ) : (
-                                  <div>
-                                    <div className="flex gap-1 overflow-x-auto justify-center">
-                                      {files.map(file => (
-                                        <div
-                                          key={file.name}
-                                          className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden"
-                                        >
-                                          {showImages && imageUrls[file.fullPath] ? (
-                                            <img src={imageUrls[file.fullPath]} alt={file.name} className="w-[90px] h-[90px] object-cover rounded bg-surface" loading="lazy" />
-                                          ) : (
-                                            <div className="flex flex-col items-center justify-center w-[90px] h-[90px] bg-surface-light rounded">
-                                              <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
-                                              <span className="text-[8px] text-text-muted mt-1">{formatSize(file.size)}</span>
-                                            </div>
-                                          )}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
+                                        return next
+                                      })
+                                    }}
+                                  />
+                                </div>
+                              )}
                             </div>
-                          )
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            ) : selectedYear ? (
-              <div className="flex items-center justify-center flex-1 text-text-muted text-sm">
-                Select a month
-              </div>
-            ) : null}
-          </>
-        )}
-      </div>
+                            <div className="p-2 bg-white">
+                              {files.length === 0 ? (
+                                <div className="text-center py-1 text-text-muted text-[9px]">No files</div>
+                              ) : (
+                                <div className="flex gap-1 overflow-x-auto justify-center">
+                                  {files.map(file => (
+                                    <div
+                                      key={file.fullPath}
+                                      className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden"
+                                    >
+                                      {file.url ? (
+                                        <img src={file.url} alt={file.name} className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
+                                      ) : (
+                                        <div className="flex flex-col items-center justify-center w-[80px] h-[80px] bg-surface-light rounded">
+                                          <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
+                                          <span className="text-[8px] text-text-muted mt-1">{formatSize(file.size)}</span>
+                                        </div>
+                                      )}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+              ) : null}
+            </>
+          )}
+        </div>
       </div>
     </div>
     </div>
 
+    {/* Re-scan Confirmation Modal */}
     {showRescanModal && (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
         <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowRescanModal(false)} />
         <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-          <button
-            onClick={() => setShowRescanModal(false)}
-            className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
-          >
+          <button onClick={() => setShowRescanModal(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
             <X size={18} className="text-gray-400" />
           </button>
-
           <div className="flex flex-col items-center text-center gap-4">
             <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center">
               <AlertTriangle size={28} className="text-amber-500" />
             </div>
-
             <div>
               <h3 className="text-lg font-bold text-gray-900 mb-2">Re-scan Confirmation</h3>
               <p className="text-sm text-gray-600 leading-relaxed">
-                Re-scanning is a <span className="font-semibold text-amber-600">time-consuming process</span>.
-                Depending on total files, it can take <span className="font-semibold">several hours</span> to complete.
+                This scans <span className="font-semibold text-cyan-600">all folders</span> per ward.
+                It can take <span className="font-semibold">significantly longer</span> for wards with many files.
               </p>
             </div>
-
             <div className="w-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file in storage, which significantly <span className="font-semibold">increases server costs</span></p>
+                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file — <span className="font-semibold">increases API costs</span></p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added or files have changed</p>
+                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added</p>
               </div>
               <div className="flex items-start gap-2.5">
                 <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Previous scan results will be replaced with fresh data</p>
+                <p className="text-xs text-amber-800 text-left">Selected wards will be replaced with fresh data, other wards stay intact</p>
               </div>
             </div>
-
             <div className="flex items-center gap-3 w-full pt-2">
-              <button
-                onClick={() => setShowRescanModal(false)}
-                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer"
-              >
+              <button onClick={() => setShowRescanModal(false)} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">
                 Cancel
               </button>
-              <button
-                onClick={openWardPicker}
-                className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25"
-              >
+              <button onClick={openWardPicker} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-cyan-500 hover:bg-cyan-600 transition-colors cursor-pointer shadow-lg shadow-cyan-500/25">
                 Continue
               </button>
             </div>

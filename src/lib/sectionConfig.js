@@ -8,6 +8,18 @@ const DEFAULTS = {
     cities: ['Ajmer', 'Bharatpur', 'Bundi', 'Chennai', 'Chirawa', 'Dausa', 'Dei-Bundi', 'Etmadpur', 'Sikar'],
     cleanedCities: [],
   },
+  attendance: {
+    cities: [],
+    cleanedCities: [],
+  },
+  skipLine: {
+    cities: [],
+    cleanedCities: [],
+  },
+  logBook: {
+    cities: [],
+    cleanedCities: [],
+  },
 }
 
 // ── Cache helpers (localStorage) ──
