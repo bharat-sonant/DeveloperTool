@@ -349,7 +349,7 @@ export async function loadAttendanceScanResult(cityPath) {
   try {
     const fileRef = storageRef(storage, path)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     return await res.json()
   } catch {
@@ -651,7 +651,7 @@ export async function scanSkipLineImages(cityPath, selectedWards, onProgress) {
                 getDownloadURL(item),
               ])
               return {
-                name: meta.name,
+
                 fullPath: meta.fullPath,
                 size: meta.size,
                 contentType: meta.contentType,
@@ -704,7 +704,7 @@ export async function loadSkipLineScanResult(cityPath) {
   try {
     const fileRef = storageRef(storage, `${cityPath}/SkipData/skipLineScanResult.json`)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     return await res.json()
   } catch {
@@ -722,7 +722,7 @@ export async function loadLogBookCityConfig() {
   try {
     const fileRef = storageRef(storage, LOGBOOK_CITY_CONFIG_PATH)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     const data = await res.json()
     return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
@@ -765,6 +765,7 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
     city: cityPath,
     scannedAt: now.toISOString(),
     totalFiles: 0,
+    totalSize: 0,
     wards: existing?.wards || {},
   }
   for (const ward of selectedWards) {
@@ -772,7 +773,7 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
   }
 
   let hitCount = 0
-  const progress = { ward: '', path: '', hits: 0, filesFound: 0, lastFile: '' }
+  const progress = { ward: '', path: '', hits: 0, filesFound: 0, totalSize: 0, lastFile: '' }
   const updateProgress = (updates) => {
     Object.assign(progress, updates)
     if (onProgress) onProgress({ ...progress })
@@ -780,7 +781,7 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
 
   for (const ward of selectedWards) {
     updateProgress({ ward, path: `${ward}/...`, lastFile: '' })
-    const wardData = { totalFiles: 0, years: {} }
+    const wardData = { totalFiles: 0, totalSize: 0, years: {} }
 
     hitCount++
     updateProgress({ hits: hitCount })
@@ -802,8 +803,8 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
         updateProgress({ hits: hitCount, path: `${ward}/${year}/${month}` })
         const datesResult = await listAll(storageRef(storage, monthRef.fullPath))
 
-        if (!wardData.years[year]) wardData.years[year] = { totalFiles: 0, months: {} }
-        const monthData = { totalFiles: 0, dates: {} }
+        if (!wardData.years[year]) wardData.years[year] = { totalFiles: 0, totalSize: 0, months: {} }
+        const monthData = { totalFiles: 0, totalSize: 0, dates: {} }
 
         await Promise.all(datesResult.prefixes.map(async (dateRef) => {
           const date = dateRef.name
@@ -815,17 +816,10 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
             hitCount++
             updateProgress({ hits: hitCount, lastFile: item.name, filesFound: scanData.totalFiles })
             try {
-              const [meta, downloadUrl] = await Promise.all([
-                getMetadata(item),
-                getDownloadURL(item),
-              ])
+              const meta = await getMetadata(item)
               return {
-                name: meta.name,
                 fullPath: meta.fullPath,
                 size: meta.size,
-                contentType: meta.contentType,
-                timeCreated: meta.timeCreated,
-                url: downloadUrl,
               }
             } catch {
               return null
@@ -834,36 +828,43 @@ export async function scanLogBookImages(cityPath, selectedWards, onProgress) {
 
           const validFiles = filesMeta.filter(Boolean)
           if (validFiles.length > 0) {
-            monthData.dates[date] = { files: validFiles.length, filesMeta: validFiles }
+            const dateSize = validFiles.reduce((s, f) => s + (f.size || 0), 0)
+            monthData.dates[date] = validFiles
             monthData.totalFiles += validFiles.length
+            monthData.totalSize += dateSize
             scanData.totalFiles += validFiles.length
-            updateProgress({ filesFound: scanData.totalFiles })
+            scanData.totalSize += dateSize
+            updateProgress({ filesFound: scanData.totalFiles, totalSize: scanData.totalSize })
           }
         }))
 
         if (monthData.totalFiles > 0) {
           wardData.years[year].months[month] = monthData
           wardData.years[year].totalFiles += monthData.totalFiles
+          wardData.years[year].totalSize = (wardData.years[year].totalSize || 0) + monthData.totalSize
         }
       }
 
       if (!wardData.years[year] || wardData.years[year].totalFiles <= 0) delete wardData.years[year]
-      else wardData.totalFiles += wardData.years[year].totalFiles
+      else {
+        wardData.totalFiles += wardData.years[year].totalFiles
+        wardData.totalSize += wardData.years[year].totalSize || 0
+      }
     }
 
-    if (wardData.totalFiles > 0) {
-      scanData.wards[ward] = wardData
-    }
+    // Always save ward — even with 0 files (shows as "Cleaned" in drawer)
+    scanData.wards[ward] = wardData
   }
 
   scanData.totalFiles = Object.values(scanData.wards).reduce((s, w) => s + w.totalFiles, 0)
+  scanData.totalSize = Object.values(scanData.wards).reduce((s, w) => s + (w.totalSize || 0), 0)
   await saveLogBookScanResult(cityPath, scanData)
   return scanData
 }
 
 export async function saveLogBookScanResult(cityPath, data) {
   ensureStorage()
-  const filePath = `${cityPath}/LogBookImages/logBookScanResult.json`
+  const filePath = `Common/DeveloperTool/Logbook/${cityPath}.json`
   const fileRef = storageRef(storage, filePath)
   await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
 }
@@ -871,9 +872,9 @@ export async function saveLogBookScanResult(cityPath, data) {
 export async function loadLogBookScanResult(cityPath) {
   ensureStorage()
   try {
-    const fileRef = storageRef(storage, `${cityPath}/LogBookImages/logBookScanResult.json`)
+    const fileRef = storageRef(storage, `Common/DeveloperTool/Logbook/${cityPath}.json`)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + '&_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     return await res.json()
   } catch {
@@ -1056,7 +1057,7 @@ export async function loadDutyOnOffCityConfig() {
   try {
     const fileRef = storageRef(storage, CITY_CONFIG_PATH)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     const data = await res.json()
     return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
@@ -1079,7 +1080,7 @@ export async function loadAttendanceCityConfig() {
   try {
     const fileRef = storageRef(storage, ATTENDANCE_CITY_CONFIG_PATH)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     const data = await res.json()
     return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
@@ -1104,7 +1105,7 @@ export async function loadSkipLineCityConfig() {
   try {
     const fileRef = storageRef(storage, SKIPLINE_CITY_CONFIG_PATH)
     const url = await getDownloadURL(fileRef)
-    const res = await fetch(url)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
     if (!res.ok) return null
     const data = await res.json()
     return { cities: data.cities || [], cleanedCities: data.cleanedCities || [] }
@@ -1143,4 +1144,102 @@ export async function getStorageFolderSize(path) {
   }
 
   return { totalSize, fileCount }
+}
+
+// ── Master City List ──
+export async function loadCityCommonData() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, 'Common/CityCommonData.json')
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+/** List all city folders from storage root — returns actual folder names with correct casing */
+export async function listStorageCityFolders() {
+  ensureStorage()
+  const result = await listAll(storageRef(storage, ''))
+  return result.prefixes.map(p => p.name).sort()
+}
+
+/** Returns valid city folders by matching CityCommonData.json keys with storage root folders (case-insensitive) */
+export async function listValidCityFolders() {
+  const [cityData, storageFolders] = await Promise.all([
+    loadCityCommonData(),
+    listStorageCityFolders(),
+  ])
+  if (!cityData || !storageFolders) return []
+  const cityKeys = Object.keys(cityData)
+  const folderMap = new Map(storageFolders.map(f => [f.toLowerCase(), f]))
+  return cityKeys
+    .map(key => folderMap.get(key.toLowerCase()))
+    .filter(Boolean)
+    .sort()
+}
+
+const COMMON_CITIES_PATH = 'Common/DeveloperTool/CommonCities.json'
+
+export async function loadCommonCities() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, COMMON_CITIES_PATH)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null
+  }
+}
+
+export async function saveCommonCities(cities) {
+  ensureStorage()
+  const sorted = [...cities].sort()
+  const fileRef = storageRef(storage, COMMON_CITIES_PATH)
+  await uploadString(fileRef, JSON.stringify(sorted), 'raw', { contentType: 'application/json' })
+  return sorted
+}
+
+/** Try cached CommonCities.json first, fallback to CityCommonData.json + storage match */
+export async function resolveCommonCities() {
+  const cached = await loadCommonCities()
+  if (cached && cached.length > 0) return cached
+  const cities = await listValidCityFolders()
+  if (cities.length > 0) await saveCommonCities(cities)
+  return cities
+}
+
+const LOGBOOK_CITIES_PATH = 'Common/DeveloperTool/LogBookCities.json'
+
+/** Load LogBookCities config — returns { included: [], mainPage: [] } */
+export async function loadLogBookCities() {
+  ensureStorage()
+  try {
+    const fileRef = storageRef(storage, LOGBOOK_CITIES_PATH)
+    const url = await getDownloadURL(fileRef)
+    const res = await fetch(url + (url.includes('?') ? '&' : '?') + '_t=' + Date.now(), { cache: 'no-store' })
+    if (!res.ok) return { included: [], mainPage: [] }
+    const data = await res.json()
+    // Backward compat: old format was plain array
+    if (Array.isArray(data)) return { included: data, mainPage: [] }
+    return { included: data.included || [], mainPage: data.mainPage || [] }
+  } catch {
+    return { included: [], mainPage: [] }
+  }
+}
+
+export async function saveLogBookCities(included, mainPage) {
+  ensureStorage()
+  const data = {
+    included: [...included].sort(),
+    mainPage: [...mainPage].sort(),
+  }
+  const fileRef = storageRef(storage, LOGBOOK_CITIES_PATH)
+  await uploadString(fileRef, JSON.stringify(data), 'raw', { contentType: 'application/json' })
+  return data
 }

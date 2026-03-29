@@ -1,39 +1,85 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
-import { deleteStorageFiles, listLogBookWards, scanLogBookImages, saveLogBookScanResult, loadLogBookScanResult, loadLogBookCityConfig } from '../../lib/firebase'
+import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, X, Clock, Settings2, Check, MapPin, BookOpen } from 'lucide-react'
+import { deleteStorageFiles, listLogBookWards, scanLogBookImages, saveLogBookScanResult, loadLogBookScanResult, resolveCommonCities, loadLogBookCities, saveLogBookCities } from '../../lib/firebase'
 import { formatSize } from './utils'
-import CitySelector from '../CitySelector'
-import { getCachedSectionConfig, cacheSectionConfig } from '../../lib/sectionConfig'
 
 export default function LogBookSection() {
   // City selection
-  const cached = getCachedSectionConfig('logBook')
-  const activeCities0 = cached.cities.filter(c => !cached.cleanedCities.includes(c))
-  const [lbCities, setLbCities] = useState(activeCities0)
-  const [selectedCity, setSelectedCity] = useState(activeCities0[0] || null)
+  const [allCities, setAllCities] = useState([])           // master list (CommonCities.json)
+  const [includedCities, setIncludedCities] = useState([])  // LogBookCities.included
+  const [mainPageCities, setMainPageCities] = useState([])  // LogBookCities.mainPage
+  const [selectedCity, setSelectedCity] = useState(null)
+  const [loadingCities, setLoadingCities] = useState(true)
+  const [savingCities, setSavingCities] = useState(false)
 
   useEffect(() => {
-    const refresh = async () => {
-      try {
-        const remote = await loadLogBookCityConfig()
-        if (remote) {
-          const active = remote.cities.filter(c => !remote.cleanedCities.includes(c))
-          setLbCities(prev => JSON.stringify(prev) === JSON.stringify(active) ? prev : active)
-          cacheSectionConfig('logBook', remote.cities, remote.cleanedCities)
+    loadLogBookCities().then(async (config) => {
+      if (config.included.length > 0) {
+        setIncludedCities(config.included)
+        setMainPageCities(config.mainPage)
+        const firstCity = config.mainPage[0] || config.included[0]
+        if (firstCity) {
+          setSelectedCity(firstCity)
+          // Load scan result in same flow — no flicker
+          const cached = await loadLogBookScanResult(firstCity)
+          if (cached) {
+            setScanResult(cached)
+            const firstWard = Object.entries(cached.wards || {}).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+            if (firstWard) setSelectedWard(firstWard)
+          }
         }
-      } catch (err) {
-        console.warn('Could not load logbook cities:', err.message)
       }
-    }
-    refresh()
-    window.addEventListener('focus', refresh)
-    return () => window.removeEventListener('focus', refresh)
+      initialLoadDone.current = true
+      setLoadingCities(false)
+    })
+    // Load master city list in background (only needed for drawer)
+    resolveCommonCities().then(master => {
+      if (master && master.length > 0) setAllCities(master)
+    })
   }, [])
 
-  const [scanning, setScanning] = useState(false)
-  const [scanProgress, setScanProgress] = useState(null)
+  const saveCities = async (included, mainPage) => {
+    setSavingCities(true)
+    await saveLogBookCities(included, mainPage)
+    setSavingCities(false)
+  }
+
+  const addCity = async (city) => {
+    const updated = [...includedCities, city].sort()
+    setIncludedCities(updated)
+    await saveCities(updated, mainPageCities)
+    if (!selectedCity) setSelectedCity(city)
+  }
+
+  const removeCity = async (city) => {
+    const updatedIncluded = includedCities.filter(c => c !== city)
+    const updatedMainPage = mainPageCities.filter(c => c !== city)
+    setIncludedCities(updatedIncluded)
+    setMainPageCities(updatedMainPage)
+    await saveCities(updatedIncluded, updatedMainPage)
+    if (selectedCity === city) setSelectedCity(updatedMainPage[0] || updatedIncluded[0] || null)
+  }
+
+  const toggleMainPage = async (city) => {
+    const isOn = mainPageCities.includes(city)
+    const updated = isOn ? mainPageCities.filter(c => c !== city) : [...mainPageCities, city].sort()
+    setMainPageCities(updated)
+    if (isOn && selectedCity === city) {
+      // Removing from page — switch or clear
+      setSelectedCity(updated[0] || null)
+      if (updated.length === 0) { setScanResult(null); setAllDateFiles({}) }
+    } else if (!isOn && !selectedCity) {
+      // Adding to page and no city selected — auto select
+      setSelectedCity(city)
+    }
+    await saveCities(includedCities, updated)
+  }
+
+  const availableCities = allCities.filter(c => !includedCities.includes(c))
+
   const [scanResult, setScanResult] = useState(null)
-  const [loadingScanResult, setLoadingScanResult] = useState(true)
+  const [loadingScanResult, setLoadingScanResult] = useState(false)
+  const initialLoadDone = useRef(false)
 
   const [selectedWard, setSelectedWard] = useState(null)
   const [selectedYear, setSelectedYear] = useState(null)
@@ -43,17 +89,36 @@ export default function LogBookSection() {
   const [selectedFiles, setSelectedFiles] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
 
-  const [showRescanModal, setShowRescanModal] = useState(false)
-  const [showWardPicker, setShowWardPicker] = useState(false)
-  const [availableWards, setAvailableWards] = useState([])
-  const [pickedWards, setPickedWards] = useState(new Set())
-  const [loadingWards, setLoadingWards] = useState(false)
+  const [showCityDrawer, setShowCityDrawer] = useState(false)
+  const [showAvailableCities, setShowAvailableCities] = useState(false)
+  const [drawerSelectedCity, setDrawerSelectedCity] = useState(null) // city selected in drawer list
+  const [drawerWards, setDrawerWards] = useState([])
+  const [drawerScanData, setDrawerScanData] = useState(null) // full scan result for drawer city
+  const [loadingDrawerWards, setLoadingDrawerWards] = useState(false)
+  const [scanningWard, setScanningWard] = useState(null) // ward currently being scanned in drawer
+  const [wardScanProgress, setWardScanProgress] = useState(null)
+  const [wardScanElapsed, setWardScanElapsed] = useState(0)
+  const wardTimerRef = useRef(null)
+  const [scanAllRunning, setScanAllRunning] = useState(false)
+  const [scanAllStopping, setScanAllStopping] = useState(false)
+  const [resettingWard, setResettingWard] = useState(null)
+  const stopScanAllRef = useRef(false)
 
-  const [elapsedTime, setElapsedTime] = useState(0)
-  const timerRef = useRef(null)
+  useEffect(() => {
+    if (!drawerSelectedCity) { setDrawerWards([]); setDrawerScanData(null); return }
+    setLoadingDrawerWards(true)
+    Promise.all([
+      listLogBookWards(drawerSelectedCity),
+      loadLogBookScanResult(drawerSelectedCity),
+    ]).then(([wards, scanData]) => {
+      setDrawerWards(wards || [])
+      setDrawerScanData(scanData || null)
+    }).catch(() => { setDrawerWards([]); setDrawerScanData(null) })
+      .finally(() => setLoadingDrawerWards(false))
+  }, [drawerSelectedCity])
 
   const wardList = scanResult
-    ? Object.keys(scanResult.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    ? Object.entries(scanResult.wards).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     : []
 
   const MONTH_ORDER = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
@@ -63,7 +128,7 @@ export default function LogBookSection() {
     const list = []
     for (const [year, yearData] of Object.entries(scanResult.wards[selectedWard].years)) {
       for (const [month, monthData] of Object.entries(yearData.months)) {
-        list.push({ year, month, totalFiles: monthData.totalFiles, key: `${year}-${month}` })
+        list.push({ year, month, totalFiles: monthData.totalFiles, totalSize: monthData.totalSize || 0, key: `${year}-${month}` })
       }
     }
     return list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_ORDER[b.month] || 0) - (MONTH_ORDER[a.month] || 0))
@@ -79,75 +144,6 @@ export default function LogBookSection() {
 
   const allFiles = Object.values(allDateFiles).flat()
 
-  const openWardPicker = async () => {
-    setLoadingWards(true)
-    setShowRescanModal(false)
-    setShowWardPicker(true)
-    setPickedWards(new Set())
-    try {
-      const folders = await listLogBookWards(selectedCity)
-      setAvailableWards(folders)
-    } catch {
-      setAvailableWards([])
-    }
-    setLoadingWards(false)
-  }
-
-  const toggleWard = (ward) => {
-    setPickedWards(prev => {
-      const next = new Set(prev)
-      if (next.has(ward)) next.delete(ward)
-      else if (next.size < 3) next.add(ward)
-      return next
-    })
-  }
-
-  const renderWardPicker = () => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowWardPicker(false)} />
-      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-        <button onClick={() => setShowWardPicker(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
-          <X size={18} className="text-gray-400" />
-        </button>
-        <div className="flex flex-col gap-4">
-          <div>
-            <h3 className="text-lg font-bold text-gray-900 mb-1">Select Wards to Scan</h3>
-            <p className="text-xs text-gray-500">Choose up to <span className="font-semibold text-violet-600">3 wards</span> at a time.</p>
-          </div>
-          {loadingWards ? (
-            <div className="flex items-center justify-center py-8"><Loader2 size={20} className="animate-spin text-violet-500" /><span className="text-sm text-text-muted ml-2">Loading wards...</span></div>
-          ) : availableWards.length === 0 ? (
-            <div className="text-center py-8 text-sm text-text-muted">No wards found</div>
-          ) : (
-            <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100">
-              {availableWards.map(ward => {
-                const isChecked = pickedWards.has(ward)
-                const isDisabled = !isChecked && pickedWards.size >= 3
-                return (
-                  <button key={ward} onClick={() => !isDisabled && toggleWard(ward)}
-                    className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-all ${isChecked ? 'bg-violet-50' : isDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}>
-                    {isChecked ? <CheckSquare size={18} className="text-violet-500 shrink-0" /> : <Square size={18} className="text-gray-300 shrink-0" />}
-                    <span className={`text-sm font-medium ${isChecked ? 'text-violet-700' : 'text-gray-700'}`}>{ward}</span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-500">{pickedWards.size}/3 selected</span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setShowWardPicker(false)} className="px-4 py-2 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">Cancel</button>
-              <button onClick={() => handleScan([...pickedWards])} disabled={pickedWards.size === 0}
-                className="px-4 py-2 rounded-xl text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 transition-colors cursor-pointer shadow-lg shadow-violet-500/25 disabled:opacity-50 disabled:cursor-not-allowed">
-                Start Scan ({pickedWards.size})
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-
   function formatElapsed(seconds) {
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
@@ -157,30 +153,84 @@ export default function LogBookSection() {
     return `${s}s`
   }
 
-  const handleScan = async (wards) => {
-    setShowWardPicker(false)
-    setScanning(true)
-    setScanProgress(null)
-    setElapsedTime(0)
-    timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000)
+  const handleSingleWardScan = async (city, ward) => {
+    setScanningWard(ward)
+    setWardScanProgress(null)
+    setWardScanElapsed(0)
+    wardTimerRef.current = setInterval(() => setWardScanElapsed(t => t + 1), 1000)
     try {
-      const result = await scanLogBookImages(selectedCity, wards, (progress) => {
-        setScanProgress(progress)
+      const result = await scanLogBookImages(city, [ward], (progress) => {
+        setWardScanProgress(progress)
       })
-      setScanResult(result)
-      const firstWard = Object.keys(result.wards).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
-      if (firstWard) setSelectedWard(firstWard)
+      if (city === selectedCity) {
+        setScanResult(result)
+        const firstWard = Object.entries(result.wards || {}).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+        if (firstWard && !selectedWard) setSelectedWard(firstWard)
+      }
+      setDrawerScanData(prev => {
+        const next = prev ? JSON.parse(JSON.stringify(prev)) : { wards: {} }
+        next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, totalSize: 0, years: {} }
+        return next
+      })
     } catch {
       alert('Scan failed. Please try again.')
     }
-    clearInterval(timerRef.current)
-    setScanning(false)
+    clearInterval(wardTimerRef.current)
+    setScanningWard(null)
+    setWardScanProgress(null)
+  }
+
+  const handleScanAll = async () => {
+    const city = drawerSelectedCity
+    if (!city || drawerWards.length === 0) return
+    setScanAllRunning(true)
+    setScanAllStopping(false)
+    stopScanAllRef.current = false
+
+    for (const ward of drawerWards) {
+      if (stopScanAllRef.current) break
+      if (drawerScanData?.wards?.[ward]) continue // skip already scanned
+
+      setScanningWard(ward)
+      setWardScanProgress(null)
+      setWardScanElapsed(0)
+      wardTimerRef.current = setInterval(() => setWardScanElapsed(t => t + 1), 1000)
+
+      try {
+        const result = await scanLogBookImages(city, [ward], (progress) => {
+          setWardScanProgress(progress)
+        })
+        if (city === selectedCity) {
+          setScanResult(result)
+          const firstW = Object.entries(result.wards || {}).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          if (firstW && !selectedWard) setSelectedWard(firstW)
+        }
+        setDrawerScanData(prev => {
+          const next = prev ? JSON.parse(JSON.stringify(prev)) : { wards: {} }
+          next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, totalSize: 0, years: {} }
+          return next
+        })
+      } catch {
+        // skip failed ward, continue to next
+      }
+
+      clearInterval(wardTimerRef.current)
+      setScanningWard(null)
+      setWardScanProgress(null)
+    }
+
+    setScanAllRunning(false)
+    setScanAllStopping(false)
+    stopScanAllRef.current = false
+  }
+
+  const stopScanAll = () => {
+    stopScanAllRef.current = true
+    setScanAllStopping(true)
   }
 
   const handleDeleteSelected = async () => {
     if (selectedFiles.size === 0) return
-    const confirmed = window.confirm(`Are you sure you want to delete ${selectedFiles.size} file(s)? This action cannot be undone.`)
-    if (!confirmed) return
     setDeleting(true)
     try {
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
@@ -200,27 +250,70 @@ export default function LogBookSection() {
         const monthData = next.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]
         if (monthData) {
           const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
-          for (const [date, dateData] of Object.entries(monthData.dates || {})) {
-            if (dateData.filesMeta) dateData.filesMeta = dateData.filesMeta.filter(f => !deletedPaths.has(f.fullPath))
-            dateData.files = dateData.filesMeta?.length || 0
-            if (dateData.files <= 0) delete monthData.dates[date]
+          for (const [date, files] of Object.entries(monthData.dates || {})) {
+            monthData.dates[date] = files.filter(f => !deletedPaths.has(f.fullPath))
+            if (!monthData.dates[date].length) delete monthData.dates[date]
           }
-          monthData.totalFiles = Object.values(monthData.dates || {}).reduce((s, d) => s + d.files, 0)
+          const recalc = (dates) => {
+            const files = Object.values(dates || {}).flat()
+            return { totalFiles: files.length, totalSize: files.reduce((s, f) => s + (f.size || 0), 0) }
+          }
+          const mc = recalc(monthData.dates)
+          monthData.totalFiles = mc.totalFiles
+          monthData.totalSize = mc.totalSize
           if (monthData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear].months[selectedMonth]
           const yearData = next.wards[selectedWard]?.years[selectedYear]
           if (yearData) {
             yearData.totalFiles = Object.values(yearData.months || {}).reduce((s, m) => s + m.totalFiles, 0)
+            yearData.totalSize = Object.values(yearData.months || {}).reduce((s, m) => s + (m.totalSize || 0), 0)
             if (yearData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear]
           }
           const wardData = next.wards[selectedWard]
           if (wardData) {
             wardData.totalFiles = Object.values(wardData.years || {}).reduce((s, y) => s + y.totalFiles, 0)
-            if (wardData.totalFiles <= 0) delete next.wards[selectedWard]
+            wardData.totalSize = Object.values(wardData.years || {}).reduce((s, y) => s + (y.totalSize || 0), 0)
           }
           next.totalFiles = Object.values(next.wards || {}).reduce((s, w) => s + w.totalFiles, 0)
+          next.totalSize = Object.values(next.wards || {}).reduce((s, w) => s + (w.totalSize || 0), 0)
         }
         setScanResult(next)
+        // Sync drawer scan data if same city
+        if (selectedCity === drawerSelectedCity) {
+          setDrawerScanData(next)
+        }
         saveLogBookScanResult(selectedCity, next).catch(() => {})
+
+        // Auto-select next month if current month got emptied
+        if (!next.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]) {
+          const wd = next.wards[selectedWard]
+          const wardStillHasData = wd && (wd.totalFiles || 0) > 0
+          if (wardStillHasData) {
+            // Current ward still has data — select next available month
+            const MONTH_ORDER = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
+            const remaining = []
+            for (const [y, yd] of Object.entries(wd.years || {})) {
+              for (const [m] of Object.entries(yd.months || {})) {
+                remaining.push({ year: y, month: m })
+              }
+            }
+            remaining.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_ORDER[b.month] || 0) - (MONTH_ORDER[a.month] || 0))
+            if (remaining.length > 0) {
+              setSelectedYear(remaining[0].year)
+              setSelectedMonth(remaining[0].month)
+            } else {
+              setSelectedYear(null)
+              setSelectedMonth(null)
+            }
+            setAllDateFiles({})
+          } else {
+            // Ward fully cleaned — select next ward with data
+            const nextWard = Object.entries(next.wards).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+            setSelectedWard(nextWard || null)
+            setSelectedYear(null)
+            setSelectedMonth(null)
+            setAllDateFiles({})
+          }
+        }
       }
 
       if (failed.length > 0) alert(`${deleted} file(s) deleted. ${failed.length} file(s) failed.`)
@@ -242,6 +335,8 @@ export default function LogBookSection() {
 
   useEffect(() => {
     if (!selectedCity) { setLoadingScanResult(false); return }
+    // Skip on initial mount — already loaded in init effect
+    if (!initialLoadDone.current) return
     setLoadingScanResult(true)
     setScanResult(null)
     setSelectedWard(null)
@@ -251,7 +346,7 @@ export default function LogBookSection() {
     loadLogBookScanResult(selectedCity).then(cached => {
       if (cached) {
         setScanResult(cached)
-        const firstWard = Object.keys(cached.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+        const firstWard = Object.entries(cached.wards || {}).filter(([, w]) => (w.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
         if (firstWard) setSelectedWard(firstWard)
       }
     }).finally(() => setLoadingScanResult(false))
@@ -274,62 +369,338 @@ export default function LogBookSection() {
     const monthData = scanResult.wards[selectedWard]?.years[selectedYear]?.months[selectedMonth]
     if (!monthData?.dates) { setAllDateFiles({}); return }
     const map = {}
-    for (const [date, dateData] of Object.entries(monthData.dates)) {
-      map[date] = dateData.filesMeta || []
+    for (const [date, files] of Object.entries(monthData.dates)) {
+      map[date] = Array.isArray(files) ? files : files.filesMeta || []
     }
     setAllDateFiles(map)
   }, [selectedCity, selectedWard, selectedYear, selectedMonth, scanResult])
 
-  if (loadingScanResult) {
+  const renderCityDrawer = () => {
+    const drawerCityIsOnMainPage = drawerSelectedCity ? mainPageCities.includes(drawerSelectedCity) : false
+    const scannedCount = drawerScanData?.wards ? Object.keys(drawerScanData.wards).length : 0
+    const cleanedCount = drawerScanData?.wards ? Object.values(drawerScanData.wards).filter(w => (w.totalFiles || 0) === 0).length : 0
+    const hasDataCount = scannedCount - cleanedCount
+
+    return (
+    <>
+      <div className={`fixed inset-0 z-50 transition-opacity duration-200 ${showCityDrawer ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+        <div className="absolute inset-0 bg-black/20 backdrop-blur-[2px]" onClick={() => !scanningWard && setShowCityDrawer(false)} />
+        <div className={`absolute top-0 right-0 h-full w-[55vw] bg-gradient-to-b from-white to-slate-50/80 shadow-2xl transition-transform duration-300 ease-out flex flex-col ${showCityDrawer ? 'translate-x-0' : 'translate-x-full'}`}>
+
+          {/* Header */}
+          <div className="px-5 py-3.5 border-b border-slate-100 bg-white flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center shadow-sm">
+              <Settings2 size={14} className="text-white" />
+            </div>
+            <h3 className="text-[13px] font-bold text-slate-800 flex-1">City Setting</h3>
+            <button
+              disabled={!!scanningWard}
+              onClick={() => setShowAvailableCities(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold text-violet-600 bg-violet-50 border border-violet-200/80 hover:bg-violet-100 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+            >
+              <span className="text-sm leading-none">+</span> Add City
+            </button>
+            {savingCities && <Loader2 size={14} className="animate-spin text-violet-400" />}
+            <button disabled={!!scanningWard} onClick={() => !scanningWard && setShowCityDrawer(false)} className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${scanningWard ? 'opacity-30 cursor-not-allowed' : 'hover:bg-slate-100 cursor-pointer'}`}>
+              <X size={15} className="text-slate-400" />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="flex flex-1 min-h-0">
+
+            {/* Left: City list */}
+            <div className="w-[180px] shrink-0 border-r border-slate-100 bg-white/60 flex flex-col">
+              <div className="px-3 py-2 border-b border-slate-100">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{includedCities.length} Cities</span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {includedCities.length === 0 ? (
+                  <p className="text-[10px] text-text-muted px-3 py-6 text-center">No cities yet</p>
+                ) : (
+                  includedCities.map((city) => {
+                    const isSelected = drawerSelectedCity === city
+                    const isOnPage = mainPageCities.includes(city)
+                    return (
+                      <button
+                        key={city}
+                        disabled={!!scanningWard}
+                        onClick={() => !scanningWard && setDrawerSelectedCity(city)}
+                        className={`w-full flex items-center gap-2 px-3 py-2.5 text-left transition-all border-l-2 ${
+                          scanningWard
+                            ? (isSelected ? 'bg-violet-50/80 border-l-violet-500 text-violet-700 cursor-not-allowed' : 'border-l-transparent text-slate-400 cursor-not-allowed opacity-50')
+                            : isSelected
+                              ? 'bg-violet-50/80 border-l-violet-500 text-violet-700 cursor-pointer'
+                              : 'border-l-transparent hover:bg-slate-50 text-slate-600 cursor-pointer'
+                        }`}
+                      >
+                        <span className={`text-[11px] flex-1 truncate ${isSelected ? 'font-bold' : 'font-medium'}`}>{city}</span>
+                        {isOnPage && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
+
+            {/* Right: Selected city detail */}
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {!drawerSelectedCity ? (
+                <div className="flex-1 flex flex-col items-center justify-center gap-2">
+                  <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center">
+                    <MapPin size={20} className="text-slate-300" />
+                  </div>
+                  <p className="text-[11px] text-slate-400">Select a city to manage</p>
+                </div>
+              ) : (
+                <>
+                  {/* City header with actions */}
+                  <div className="px-5 py-3 border-b border-slate-100 bg-white">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-[14px] font-bold text-slate-800 flex-1">{drawerSelectedCity}</h3>
+                      <button
+                        disabled={savingCities}
+                        onClick={() => toggleMainPage(drawerSelectedCity)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer disabled:opacity-50 ${
+                          drawerCityIsOnMainPage
+                            ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-600'
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200'
+                        }`}
+                      >
+                        {drawerCityIsOnMainPage ? '✓ On Page' : 'Show on Page'}
+                      </button>
+                      {!drawerCityIsOnMainPage && (
+                        <button
+                          disabled={savingCities}
+                          onClick={() => { removeCity(drawerSelectedCity); setDrawerSelectedCity(null) }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer disabled:opacity-50 text-red-400 border border-red-200/80 hover:bg-red-50 hover:text-red-600"
+                        >
+                          <X size={11} /> Remove
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Ward stats summary */}
+                    {drawerWards.length > 0 && (
+                      <div className="mt-3">
+                        {/* Progress bar */}
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden flex">
+                            {cleanedCount > 0 && <div className="h-full bg-emerald-400 transition-all" style={{ width: `${(cleanedCount / drawerWards.length) * 100}%` }} />}
+                            {hasDataCount > 0 && <div className="h-full bg-amber-400 transition-all" style={{ width: `${(hasDataCount / drawerWards.length) * 100}%` }} />}
+                          </div>
+                          <span className="text-[9px] text-slate-400 font-medium shrink-0">{scannedCount}/{drawerWards.length}</span>
+                        </div>
+                        {/* Legend */}
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-1.5 text-[9px]">
+                            <span className="w-2.5 h-2.5 rounded bg-emerald-400 shrink-0" />
+                            <span className="text-slate-500">{cleanedCount} Cleaned</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[9px]">
+                            <span className="w-2.5 h-2.5 rounded bg-amber-400 shrink-0" />
+                            <span className="text-slate-500">{hasDataCount} Has Data</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-[9px]">
+                            <span className="w-2.5 h-2.5 rounded bg-slate-200 shrink-0" />
+                            <span className="text-slate-400">{drawerWards.length - scannedCount} Pending</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Wards toolbar */}
+                  <div className="px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-500">Wards</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200/60 text-slate-500 font-semibold">{drawerWards.length}</span>
+                      {drawerScanData?.wards && scannedCount > 0 && !scanAllRunning && (
+                        <button
+                          onClick={() => {
+                            if (!window.confirm(`Reset scan data for ${drawerSelectedCity}?`)) return
+                            setDrawerScanData(null)
+                            saveLogBookScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, totalSize: 0, wards: {} })
+                            if (drawerSelectedCity === selectedCity) setScanResult(null)
+                          }}
+                          className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-semibold text-red-400 hover:bg-red-50 border border-red-200/60 transition-all cursor-pointer"
+                        >
+                          <RefreshCw size={8} /> Reset All
+                        </button>
+                      )}
+                    </div>
+                    {scanAllRunning ? (
+                      scanAllStopping ? (
+                        <span className="text-[9px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                          Stopping after {scanningWard}...
+                        </span>
+                      ) : (
+                        <button onClick={stopScanAll} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-semibold bg-red-500 text-white hover:bg-red-600 transition-all cursor-pointer shadow-sm">
+                          <X size={10} /> Stop Scanning
+                        </button>
+                      )
+                    ) : (
+                      <button
+                        disabled={!!scanningWard}
+                        onClick={handleScanAll}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-semibold bg-violet-500 text-white hover:bg-violet-600 transition-all cursor-pointer disabled:opacity-30 shadow-sm"
+                      >
+                        <Search size={10} /> Start Scan
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Wards list */}
+                  <div className="flex-1 overflow-y-auto">
+                    {loadingDrawerWards ? (
+                      <div className="flex items-center justify-center py-12 gap-2">
+                        <Loader2 size={16} className="animate-spin text-violet-400" />
+                        <span className="text-xs text-text-muted">Loading wards...</span>
+                      </div>
+                    ) : drawerWards.length === 0 ? (
+                      <div className="text-center py-12 text-xs text-text-muted">No wards found</div>
+                    ) : (
+                      <div className="grid grid-cols-4 gap-2 p-3">
+                        {drawerWards.map((ward) => {
+                          const wardData = drawerScanData?.wards?.[ward]
+                          const isScanned = !!wardData
+                          const isCleaned = isScanned && (wardData.totalFiles || 0) === 0
+                          const hasData = isScanned && (wardData.totalFiles || 0) > 0
+                          const isThisScanning = scanningWard === ward
+                          const isScanBusy = !!scanningWard
+                          return (
+                            <div key={ward} className={`relative rounded-xl border p-3 transition-all ${
+                              isThisScanning
+                                ? 'border-violet-300 bg-violet-50 shadow-sm'
+                                : isCleaned
+                                  ? 'border-emerald-200 bg-emerald-50/40'
+                                  : hasData
+                                    ? 'border-amber-200 bg-amber-50/30'
+                                    : 'border-slate-200 bg-white hover:shadow-sm'
+                            }`}>
+                              {/* Reset button */}
+                              {!isThisScanning && isScanned && !isScanBusy && (
+                                resettingWard === ward ? (
+                                  <div className="absolute top-1.5 right-1.5">
+                                    <Loader2 size={10} className="animate-spin text-amber-500" />
+                                  </div>
+                                ) : (
+                                  <button
+                                    disabled={!!resettingWard}
+                                    onClick={async () => {
+                                      setResettingWard(ward)
+                                      const result = await loadLogBookScanResult(drawerSelectedCity)
+                                      if (result?.wards?.[ward]) {
+                                        delete result.wards[ward]
+                                        result.totalFiles = Object.values(result.wards).reduce((s, w) => s + w.totalFiles, 0)
+                                        await saveLogBookScanResult(drawerSelectedCity, result)
+                                        if (drawerSelectedCity === selectedCity) setScanResult(result)
+                                      }
+                                      setDrawerScanData(prev => {
+                                        if (!prev) return prev
+                                        const next = JSON.parse(JSON.stringify(prev))
+                                        delete next.wards[ward]
+                                        return next
+                                      })
+                                      setResettingWard(null)
+                                    }}
+                                    className="absolute top-1.5 right-1.5 text-[7px] font-semibold text-slate-300 hover:text-red-500 transition-colors cursor-pointer disabled:opacity-30"
+                                  >
+                                    ✕
+                                  </button>
+                                )
+                              )}
+
+                              {/* Ward name + status icon */}
+                              <div className="flex items-center gap-1.5 mb-2">
+                                {isThisScanning ? (
+                                  <Loader2 size={11} className="animate-spin text-violet-500 shrink-0" />
+                                ) : isCleaned ? (
+                                  <Check size={11} className="text-emerald-500 shrink-0" strokeWidth={3} />
+                                ) : hasData ? (
+                                  <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                                ) : (
+                                  <span className="w-2 h-2 rounded-full bg-slate-200 shrink-0" />
+                                )}
+                                <span className={`text-[11px] font-bold truncate ${
+                                  isThisScanning ? 'text-violet-700' : isCleaned ? 'text-emerald-600' : hasData ? 'text-slate-700' : 'text-slate-400'
+                                }`}>{ward}</span>
+                              </div>
+
+                              {/* Status info */}
+                              {isThisScanning ? (
+                                <div className="flex items-center gap-2 text-[8px] flex-wrap">
+                                  <span className="font-semibold text-violet-600">{formatElapsed(wardScanElapsed)}</span>
+                                  {wardScanProgress?.filesFound > 0 && (
+                                    <span className="font-bold text-emerald-600">{wardScanProgress.filesFound} · {formatSize(wardScanProgress.totalSize || 0)}</span>
+                                  )}
+                                  {wardScanProgress?.hits > 0 && (
+                                    <span className="text-sky-500">{wardScanProgress.hits} hits</span>
+                                  )}
+                                </div>
+                              ) : hasData ? (
+                                <div className="text-[9px] font-semibold text-amber-600">{wardData.totalFiles} files · {formatSize(wardData.totalSize || 0)}</div>
+                              ) : isCleaned ? (
+                                <div className="text-[9px] font-semibold text-emerald-500">Cleaned ✓</div>
+                              ) : (
+                                <div className="text-[9px] text-slate-400">Pending</div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+
+          {/* Available Cities Popup */}
+          {showAvailableCities && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center p-6">
+              <div className="absolute inset-0 bg-black/20" onClick={() => setShowAvailableCities(false)} />
+              <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[70vh] flex flex-col animate-[slideUp_0.2s_ease-out]">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-surface-lighter">
+                  <h4 className="text-sm font-bold text-text">Available Cities ({availableCities.length})</h4>
+                  <button onClick={() => setShowAvailableCities(false)} className="p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
+                    <X size={16} className="text-gray-400" />
+                  </button>
+                </div>
+                <div className="p-3 overflow-y-auto flex-1">
+                  {availableCities.length === 0 ? (
+                    <p className="text-xs text-text-muted text-center py-4">All cities already included</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableCities.map(city => (
+                        <button
+                          key={city}
+                          disabled={savingCities}
+                          onClick={() => addCity(city)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition-all cursor-pointer disabled:opacity-50 bg-surface-light text-slate-500 border border-slate-200 hover:bg-violet-50 hover:text-violet-600 hover:border-violet-200"
+                        >
+                          <span className="text-violet-400 text-xs">+</span>
+                          {city}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  )}
+
+  if (loadingCities || loadingScanResult) {
     return <div className="flex items-center justify-center h-full"><Loader2 size={20} className="animate-spin text-primary" /></div>
   }
 
-  if (!scanResult && !scanning) {
-    return (
-      <>
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <CitySelector cities={lbCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
-        <div className="w-16 h-16 rounded-2xl bg-violet-500/10 flex items-center justify-center">
-          <Search size={28} className="text-violet-500" />
-        </div>
-        <div className="text-center">
-          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data</h3>
-          <p className="text-xs text-text-muted mb-1">Scan logbook folders to find old files for cleanup</p>
-        </div>
-        <button onClick={openWardPicker} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-violet-500 text-white hover:bg-violet-600 transition-all cursor-pointer shadow-sm">
-          <Search size={16} /> Scan LogBook
-        </button>
-      </div>
-      {showWardPicker && renderWardPicker()}
-      </>
-    )
-  }
-
-  if (scanning) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Loader2 size={28} className="animate-spin text-violet-500" />
-        {scanProgress?.ward && (
-          <div className="text-center">
-            <span className="text-xs text-text-muted">Ward</span>
-            <span className="text-sm font-bold text-violet-600 ml-1.5">{scanProgress.ward}</span>
-          </div>
-        )}
-        <div className="flex items-center gap-4 text-[11px]">
-          <div className="flex items-center gap-1.5 text-text-muted">
-            <Clock size={12} />
-            <span className="font-semibold text-violet-700">{formatElapsed(elapsedTime)}</span>
-          </div>
-          {scanProgress?.filesFound > 0 && (
-            <span className="text-text-muted"><span className="font-bold text-emerald-600">{scanProgress.filesFound}</span> files</span>
-          )}
-          {scanProgress?.hits > 0 && (
-            <span className="text-text-muted"><span className="font-bold text-sky-600">{scanProgress.hits}</span> API hits</span>
-          )}
-        </div>
-      </div>
-    )
-  }
+  const noCity = mainPageCities.length === 0
+  const hasData = !noCity && !!scanResult
+  const noData = !noCity && !scanResult
 
   return (
     <>
@@ -339,81 +710,146 @@ export default function LogBookSection() {
     }}>
     <style>{`@keyframes spin-border { to { --border-angle: 360deg; } } @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }`}</style>
     <div className="flex flex-col h-full rounded-[10px] overflow-hidden bg-white">
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-text">LogBook</h3>
-          <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-violet-500/10 text-violet-600 border border-violet-500/20">
-            {scanResult.totalFiles} files
-          </span>
+      {/* Top bar */}
+      <div className="flex items-center px-4 py-2 border-b border-slate-100 bg-white">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-violet-500 to-purple-500 flex items-center justify-center">
+            <BookOpen size={13} className="text-white" />
+          </div>
+          <h3 className="text-[13px] font-bold text-slate-800">LogBook</h3>
+          {hasData && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-violet-50 border border-violet-200/60">
+              <span className="text-[10px] font-bold text-violet-600">{scanResult.totalFiles}</span>
+              <span className="text-[9px] text-violet-400">files</span>
+              <span className="text-[9px] text-violet-300">·</span>
+              <span className="text-[10px] font-semibold text-violet-500">{formatSize(scanResult.totalSize || 0)}</span>
+            </div>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          {scanResult.scannedAt && <span className="text-[9px] text-text-muted">{timeAgo(scanResult.scannedAt)}</span>}
-          <button onClick={() => setShowRescanModal(true)} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-violet-500/10 text-violet-600 border border-violet-500/20 hover:bg-violet-500/20">
-            <RefreshCw size={12} /> Re Scan
+        <div className="flex-1 flex items-center justify-center gap-1.5 mx-4">
+          {mainPageCities.map(city => (
+            <button
+              key={city}
+              onClick={() => setSelectedCity(city)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                selectedCity === city
+                  ? 'bg-violet-500 text-white shadow-md shadow-violet-500/20'
+                  : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-violet-50 hover:text-violet-600 hover:border-violet-200'
+              }`}
+            >
+              {city}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {hasData && scanResult.scannedAt && (
+            <span className="text-[9px] text-slate-400 flex items-center gap-1"><Clock size={10} />{timeAgo(scanResult.scannedAt)}</span>
+          )}
+          <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-slate-50 text-slate-600 border border-slate-200 hover:bg-violet-50 hover:text-violet-600 hover:border-violet-200">
+            <Settings2 size={12} /> City Setting
           </button>
-          <div className="w-px h-5 bg-surface-lighter" />
-          <CitySelector cities={lbCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         </div>
       </div>
 
+      {/* Content area */}
+      {noCity ? (
+        <div className="flex flex-col items-center justify-center flex-1 gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center border border-slate-200/50">
+            <Settings2 size={26} className="text-slate-300" />
+          </div>
+          <div className="text-center">
+            <h3 className="text-sm font-bold text-slate-700 mb-1">No city on page</h3>
+            <p className="text-[11px] text-slate-400 max-w-xs">Open <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }} className="font-bold text-violet-500 hover:text-violet-600 cursor-pointer underline underline-offset-2">City Setting</button> and mark cities as "Show on Page"</p>
+          </div>
+        </div>
+      ) : noData ? (
+        <div className="flex flex-col items-center justify-center flex-1 gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-violet-100 to-violet-50 flex items-center justify-center border border-violet-200/50">
+            <Search size={26} className="text-violet-300" />
+          </div>
+          <div className="text-center">
+            <h3 className="text-sm font-bold text-slate-700 mb-1">{selectedCity ? `No scan data for ${selectedCity}` : 'No Scan Data'}</h3>
+            <p className="text-[11px] text-slate-400 max-w-xs">Open <button onClick={() => { setShowCityDrawer(true); setDrawerSelectedCity(selectedCity) }} className="font-bold text-violet-500 hover:text-violet-600 cursor-pointer underline underline-offset-2">City Setting</button> → select wards → Start Scan</p>
+          </div>
+        </div>
+      ) : (
       <div className="flex flex-1 min-h-0">
-        <div className="w-22 shrink-0 border-r border-surface-lighter flex flex-col bg-gray-100">
+        {/* Ward sidebar */}
+        <div className="w-[100px] shrink-0 border-r border-slate-100 bg-slate-50/50 flex flex-col">
+          <div className="px-3 py-2 border-b border-slate-100">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Wards</span>
+          </div>
           <div className="flex-1 overflow-y-auto">
             {wardList.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-text-muted text-xs">No wards</div>
+              <div className="flex items-center justify-center h-full text-slate-400 text-[10px]">No wards</div>
             ) : (
-              <div className="flex flex-col">
-                {wardList.map((ward, idx) => {
-                  const isSelected = selectedWard === ward
-                  return (
-                    <div key={ward}>
-                      {idx > 0 && <hr className="border-surface-lighter" />}
-                      <button
-                        onClick={() => { setSelectedWard(ward); setSelectedYear(null); setSelectedMonth(null); setAllDateFiles({}) }}
-                        className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer ${isSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'}`}
-                      >
-                        <div className={`text-[11px] font-semibold truncate ${isSelected ? 'text-gray-800' : 'text-text'}`}>{ward}</div>
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
+              wardList.map((ward) => {
+                const isSelected = selectedWard === ward
+                return (
+                  <button
+                    key={ward}
+                    onClick={() => { setSelectedWard(ward); setSelectedYear(null); setSelectedMonth(null); setAllDateFiles({}) }}
+                    className={`w-full px-3 py-2 text-left transition-all cursor-pointer border-l-2 ${
+                      isSelected
+                        ? 'bg-white border-l-violet-500 text-violet-700'
+                        : 'border-l-transparent text-slate-500 hover:bg-white/80 hover:text-slate-700'
+                    }`}
+                  >
+                    <span className={`text-[11px] truncate block ${isSelected ? 'font-bold' : 'font-medium'}`}>{ward}</span>
+                  </button>
+                )
+              })
             )}
           </div>
         </div>
 
+        {/* Main content */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           {!selectedWard ? (
-            <div className="flex items-center justify-center h-full text-text-muted text-sm">Select a ward</div>
+            <div className="flex flex-col items-center justify-center h-full gap-2">
+              <span className="text-[11px] text-slate-400">← Select a ward to view data</span>
+            </div>
           ) : !scanResult.wards[selectedWard] ? (
-            <div className="flex items-center justify-center h-full text-text-muted text-sm">No data for this ward</div>
+            <div className="flex flex-col items-center justify-center h-full gap-2">
+              <span className="text-[11px] text-slate-400">No data scanned for this ward</span>
+            </div>
           ) : (
             <>
-              <div className="px-4 pt-3 space-y-3">
+              {/* Month/Year pills + actions */}
+              <div className="px-4 py-2.5 border-b border-slate-100 bg-white">
                 <div className="flex items-center gap-2 flex-wrap">
                   {yearMonthList.map(ym => {
                     const isActive = selectedYearMonth === ym.key
                     return (
                       <button key={ym.key} onClick={() => { setSelectedYear(ym.year); setSelectedMonth(ym.month); setAllDateFiles({}) }}
-                        className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${isActive ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'}`}>
-                        {ym.month} {ym.year} ({ym.totalFiles})
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                          isActive
+                            ? 'bg-violet-500 text-white shadow-sm'
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-violet-50 hover:text-violet-600'
+                        }`}>
+                        {ym.month} {ym.year} <span className={`${isActive ? 'text-violet-200' : 'text-slate-400'}`}>({ym.totalFiles})</span>
                       </button>
                     )
                   })}
                   {selectedMonth && Object.keys(allDateFiles).length > 0 && (
-                    <span className="text-[9px] text-text-muted">· {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}</span>
+                    <span className="text-[9px] text-slate-400 font-medium">· {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}</span>
                   )}
                   <div className="flex items-center gap-1.5 ml-auto">
                     {selectedFiles.size > 0 && (
                       <button onClick={handleDeleteSelected} disabled={deleting}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20 disabled:opacity-50">
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-red-500 text-white hover:bg-red-600 shadow-sm disabled:opacity-50">
                         {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                        {deleting ? 'Deleting...' : `Delete (${selectedFiles.size})`}
+                        {deleting ? 'Deleting...' : `Delete ${selectedFiles.size} files`}
                       </button>
                     )}
                     {allFiles.length > 0 && (
                       <button onClick={() => { if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set()); else setSelectedFiles(new Set(allFiles.map(f => f.fullPath))) }}
-                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'bg-primary text-white' : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'}`}>
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                          selectedFiles.size === allFiles.length && allFiles.length > 0
+                            ? 'bg-violet-500 text-white'
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-violet-50'
+                        }`}>
                         {selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'Deselect All' : 'Select All'}
                       </button>
                     )}
@@ -421,45 +857,43 @@ export default function LogBookSection() {
                 </div>
               </div>
 
+              {/* Date cards */}
               {selectedYear && selectedMonth ? (
-                <div className="flex-1 overflow-y-auto mt-3 border-t border-surface-lighter p-4">
+                <div className="flex-1 overflow-y-auto p-4 bg-slate-50/30">
                   {dateList.length === 0 ? (
-                    <div className="flex items-center justify-center h-32 text-text-muted text-xs">No dates found</div>
+                    <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No dates found for this period</div>
                   ) : (
-                    <div className="grid grid-cols-5 gap-2">
+                    <div className="grid grid-cols-5 gap-2.5">
                       {dateList.map(([date]) => {
                         const files = allDateFiles[date] || []
+                        const allChecked = files.length > 0 && files.every(f => selectedFiles.has(f.fullPath))
                         return (
-                          <div key={date} className="rounded-[5px] border border-surface-lighter overflow-hidden">
-                            <div className="px-2 py-1.5 flex items-center justify-between bg-gray-100">
+                          <div key={date} className={`rounded-xl border overflow-hidden transition-all ${
+                            allChecked ? 'border-violet-300 bg-violet-50/30 shadow-sm' : 'border-slate-200/80 bg-white hover:shadow-sm'
+                          }`}>
+                            <div className="px-2.5 py-2 flex items-center justify-between bg-gradient-to-r from-slate-50 to-transparent">
                               <div className="flex items-center gap-1.5">
-                                <Calendar size={12} className="text-gray-500" />
-                                <span className="text-[10px] font-semibold text-gray-700">{date}</span>
+                                <Calendar size={11} className="text-slate-400" />
+                                <span className="text-[10px] font-bold text-slate-700">{date}</span>
                               </div>
                               {files.length > 0 && (
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[8px] text-gray-500">{formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}</span>
-                                  <input type="checkbox" className="w-3 h-3 rounded accent-primary cursor-pointer"
-                                    checked={files.every(f => selectedFiles.has(f.fullPath))}
+                                  <span className="text-[8px] text-slate-400 font-medium">{formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}</span>
+                                  <input type="checkbox" className="w-3.5 h-3.5 rounded accent-violet-500 cursor-pointer"
+                                    checked={allChecked}
                                     onChange={(e) => { setSelectedFiles(prev => { const next = new Set(prev); files.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) }); return next }) }} />
                                 </div>
                               )}
                             </div>
-                            <div className="p-2 bg-white">
+                            <div className="px-2 py-2">
                               {files.length === 0 ? (
-                                <div className="text-center py-1 text-text-muted text-[9px]">No files</div>
+                                <div className="text-center py-2 text-slate-300 text-[9px]">Empty</div>
                               ) : (
-                                <div className="flex gap-1 overflow-x-auto justify-center">
+                                <div className="flex gap-1.5 overflow-x-auto justify-center">
                                   {files.map(file => (
-                                    <div key={file.fullPath} className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden">
-                                      {file.url ? (
-                                        <img src={file.url} alt={file.name} className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
-                                      ) : (
-                                        <div className="flex flex-col items-center justify-center w-[80px] h-[80px] bg-surface-light rounded">
-                                          <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
-                                          <span className="text-[8px] text-text-muted mt-1">{formatSize(file.size)}</span>
-                                        </div>
-                                      )}
+                                    <div key={file.fullPath} className="flex-shrink-0 flex flex-col items-center justify-center gap-1 p-1.5 rounded-lg bg-slate-50 border border-slate-100 w-[55px] h-[45px]">
+                                      <FileImage size={11} className="text-violet-400/60" />
+                                      <span className="text-[7px] text-slate-400 font-medium">{formatSize(file.size)}</span>
                                     </div>
                                   ))}
                                 </div>
@@ -476,35 +910,11 @@ export default function LogBookSection() {
           )}
         </div>
       </div>
+      )}
     </div>
     </div>
 
-    {showRescanModal && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowRescanModal(false)} />
-        <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-          <button onClick={() => setShowRescanModal(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"><X size={18} className="text-gray-400" /></button>
-          <div className="flex flex-col items-center text-center gap-4">
-            <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center"><AlertTriangle size={28} className="text-amber-500" /></div>
-            <div>
-              <h3 className="text-lg font-bold text-gray-900 mb-2">Re-scan Confirmation</h3>
-              <p className="text-sm text-gray-600 leading-relaxed">This scans <span className="font-semibold text-violet-600">all folders</span> per ward. It can take <span className="font-semibold">significantly longer</span> for wards with many files.</p>
-            </div>
-            <div className="w-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
-              <div className="flex items-start gap-2.5"><div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" /><p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file — <span className="font-semibold">increases API costs</span></p></div>
-              <div className="flex items-start gap-2.5"><div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" /><p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added</p></div>
-              <div className="flex items-start gap-2.5"><div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" /><p className="text-xs text-amber-800 text-left">Selected wards will be replaced with fresh data, other wards stay intact</p></div>
-            </div>
-            <div className="flex items-center gap-3 w-full pt-2">
-              <button onClick={() => setShowRescanModal(false)} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">Cancel</button>
-              <button onClick={openWardPicker} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-violet-500 hover:bg-violet-600 transition-colors cursor-pointer shadow-lg shadow-violet-500/25">Continue</button>
-            </div>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {showWardPicker && renderWardPicker()}
+    {renderCityDrawer()}
 
     <style>{`
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }

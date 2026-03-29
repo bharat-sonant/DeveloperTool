@@ -1,9 +1,7 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Database, HardDrive, Settings, Sparkles } from 'lucide-react'
+import { HardDrive, Settings, Sparkles } from 'lucide-react'
 
 const NAV_ITEMS = [
-  { to: '/',           icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/realtime',   icon: Database,        label: 'Realtime DB' },
   { to: '/storage',    icon: HardDrive,       label: 'Storage Cleanup' },
   { to: '/settings',   icon: Settings,        label: 'Settings' },
 ]

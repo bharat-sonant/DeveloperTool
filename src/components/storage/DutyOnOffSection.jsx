@@ -771,7 +771,7 @@ export default function DutyOnOffSection() {
                                           className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden"
                                         >
                                           {showImages && imageUrls[file.fullPath] ? (
-                                            <img src={imageUrls[file.fullPath]} alt={file.name} className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
+                                            <img src={imageUrls[file.fullPath]} alt="" className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
                                           ) : (
                                             <div className="flex flex-col items-center justify-center w-[80px] h-[80px] bg-surface-light rounded">
                                               <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
