@@ -7,11 +7,13 @@ import {
   BookOpen,
   ArrowLeftRight,
   Lock,
+  Route,
 } from 'lucide-react'
 import { motion } from 'framer-motion'
 import AttendanceSection from '../components/storage/AttendanceSection'
 import SkipLineSection from '../components/storage/SkipLineSection'
 import LogBookSection from '../components/storage/LogBookSection'
+import WardTripsSection from '../components/storage/WardTripsSection'
 import DutyOnOffSection from '../components/storage/DutyOnOffSection'
 import GenericSection from '../components/storage/GenericSection'
 
@@ -20,6 +22,7 @@ const MENU_ITEMS = [
   { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '' },
   { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData' },
   { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages' },
+  { key: 'wardTrips', label: 'Ward Trips', icon: Route,         path: 'WardTrips' },
   { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData', disabled: true },
   { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData', disabled: true },
 ]
@@ -113,7 +116,8 @@ export default function StorageBrowser() {
           {activeMenu === 'skipLine' && <SkipLineSection />}
           {activeMenu === 'dutyOnOff' && <DutyOnOffSection />}
           {activeMenu === 'logBook' && <LogBookSection />}
-          {activeMenu !== 'attendance' && activeMenu !== 'dutyOn' && activeMenu !== 'dutyOff' && activeMenu !== 'dutyOnOff' && activeMenu !== 'skipLine' && activeMenu !== 'logBook' && activeItem && (
+          {activeMenu === 'wardTrips' && <WardTripsSection />}
+          {activeMenu !== 'attendance' && activeMenu !== 'dutyOn' && activeMenu !== 'dutyOff' && activeMenu !== 'dutyOnOff' && activeMenu !== 'skipLine' && activeMenu !== 'logBook' && activeMenu !== 'wardTrips' && activeItem && (
             <GenericSection storagePath={activeItem.path} />
           )}
         </div>

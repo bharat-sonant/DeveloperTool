@@ -1,69 +1,125 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, AlertTriangle, X, CheckSquare, Square, Clock } from 'lucide-react'
-import { deleteStorageFiles, listAttendanceMonths, scanAttendanceCleanup, saveAttendanceScanResult, loadAttendanceScanResult, loadAttendanceCityConfig } from '../../lib/firebase'
+import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, X, Clock, Settings2, Check, MapPin, ClipboardList } from 'lucide-react'
+import { deleteStorageFiles, listAttendanceMonths, scanAttendanceCleanup, saveAttendanceScanResult, loadAttendanceScanResult, resolveCommonCities, loadAttendanceCities, saveAttendanceCities } from '../../lib/firebase'
 import { MONTH_ORDER, formatSize } from './utils'
-import CitySelector from '../CitySelector'
-import { getCachedSectionConfig, cacheSectionConfig } from '../../lib/sectionConfig'
 
 export default function AttendanceSection() {
-
   // City selection
-  const cached = getCachedSectionConfig('attendance')
-  const activeCities0 = cached.cities.filter(c => !cached.cleanedCities.includes(c))
-  const [attCities, setAttCities] = useState(activeCities0)
-  const [selectedCity, setSelectedCity] = useState(activeCities0[0] || null)
+  const [allCities, setAllCities] = useState([])
+  const [includedCities, setIncludedCities] = useState([])
+  const [mainPageCities, setMainPageCities] = useState([])
+  const [selectedCity, setSelectedCity] = useState(null)
+  const [loadingCities, setLoadingCities] = useState(true)
+  const [savingCities, setSavingCities] = useState(false)
 
-
-  useEffect(() => {
-    const refresh = async () => {
-      try {
-        const remote = await loadAttendanceCityConfig()
-        if (remote) {
-          const active = remote.cities.filter(c => !remote.cleanedCities.includes(c))
-          setAttCities(prev => JSON.stringify(prev) === JSON.stringify(active) ? prev : active)
-          cacheSectionConfig('attendance', remote.cities, remote.cleanedCities)
-        }
-      } catch {
-      }
-    }
-    refresh()
-    window.addEventListener('focus', refresh)
-    return () => window.removeEventListener('focus', refresh)
-  }, [])
-
-  // Scan state
-  const [scanning, setScanning] = useState(false)
-  const [scanProgress, setScanProgress] = useState(null)
   const [scanResult, setScanResult] = useState(null)
-  const [loadingScanResult, setLoadingScanResult] = useState(true)
+  const [loadingScanResult, setLoadingScanResult] = useState(false)
+  const initialLoadDone = useRef(false)
 
-  // Navigation
   const [selectedMonth, setSelectedMonth] = useState(null)
   const [selectedEmployee, setSelectedEmployee] = useState(null)
 
-  // Files from scanResult JSON (no extra Firebase calls)
   const [allDateFiles, setAllDateFiles] = useState({})
   const [selectedFiles, setSelectedFiles] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
 
-  // Month picker
-  const [showRescanModal, setShowRescanModal] = useState(false)
-  const [showMonthPicker, setShowMonthPicker] = useState(false)
-  const [availableMonths, setAvailableMonths] = useState([])
-  const [pickedMonths, setPickedMonths] = useState(new Set())
-  const [loadingMonths, setLoadingMonths] = useState(false)
+  const [showCityDrawer, setShowCityDrawer] = useState(false)
+  const [showAvailableCities, setShowAvailableCities] = useState(false)
+  const [drawerSelectedCity, setDrawerSelectedCity] = useState(null)
+  const [drawerMonths, setDrawerMonths] = useState([])
+  const [drawerScanData, setDrawerScanData] = useState(null)
+  const [loadingDrawerMonths, setLoadingDrawerMonths] = useState(false)
+  const [scanningMonth, setScanningMonth] = useState(null)
+  const [monthScanProgress, setMonthScanProgress] = useState(null)
+  const [monthScanElapsed, setMonthScanElapsed] = useState(0)
+  const monthTimerRef = useRef(null)
+  const [scanAllRunning, setScanAllRunning] = useState(false)
+  const [scanAllStopping, setScanAllStopping] = useState(false)
+  const [resettingMonth, setResettingMonth] = useState(null)
+  const stopScanAllRef = useRef(false)
 
-  // Timer
-  const [elapsedTime, setElapsedTime] = useState(0)
-  const timerRef = useRef(null)
+  useEffect(() => {
+    loadAttendanceCities().then(async (config) => {
+      if (config.included.length > 0) {
+        setIncludedCities(config.included)
+        setMainPageCities(config.mainPage)
+        const firstCity = config.mainPage[0] || config.included[0]
+        if (firstCity) {
+          setSelectedCity(firstCity)
+          const cached = await loadAttendanceScanResult(firstCity)
+          if (cached) {
+            setScanResult(cached)
+            const firstMonth = Object.entries(cached.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+            if (firstMonth) setSelectedMonth(firstMonth)
+          }
+        }
+      }
+      initialLoadDone.current = true
+      setLoadingCities(false)
+    })
+    resolveCommonCities().then(master => {
+      if (master && master.length > 0) setAllCities(master)
+    })
+  }, [])
 
-  // Derived
+  const saveCities = async (included, mainPage) => {
+    setSavingCities(true)
+    await saveAttendanceCities(included, mainPage)
+    setSavingCities(false)
+  }
+
+  const addCity = async (city) => {
+    const updated = [...includedCities, city].sort()
+    setIncludedCities(updated)
+    await saveCities(updated, mainPageCities)
+    if (!selectedCity) setSelectedCity(city)
+  }
+
+  const removeCity = async (city) => {
+    const updatedIncluded = includedCities.filter(c => c !== city)
+    const updatedMainPage = mainPageCities.filter(c => c !== city)
+    setIncludedCities(updatedIncluded)
+    setMainPageCities(updatedMainPage)
+    await saveCities(updatedIncluded, updatedMainPage)
+    if (selectedCity === city) setSelectedCity(updatedMainPage[0] || updatedIncluded[0] || null)
+  }
+
+  const toggleMainPage = async (city) => {
+    const isOn = mainPageCities.includes(city)
+    const updated = isOn ? mainPageCities.filter(c => c !== city) : [...mainPageCities, city].sort()
+    setMainPageCities(updated)
+    if (isOn && selectedCity === city) {
+      setSelectedCity(updated[0] || null)
+      if (updated.length === 0) { setScanResult(null); setAllDateFiles({}) }
+    } else if (!isOn && !selectedCity) {
+      setSelectedCity(city)
+    }
+    await saveCities(includedCities, updated)
+  }
+
+  const availableCities = allCities.filter(c => !includedCities.includes(c))
+
+  useEffect(() => {
+    if (!drawerSelectedCity) { setDrawerMonths([]); setDrawerScanData(null); return }
+    setLoadingDrawerMonths(true)
+    Promise.all([
+      listAttendanceMonths(drawerSelectedCity),
+      loadAttendanceScanResult(drawerSelectedCity),
+    ]).then(([months, scanData]) => {
+      setDrawerMonths(months || [])
+      setDrawerScanData(scanData || null)
+    }).catch(() => { setDrawerMonths([]); setDrawerScanData(null) })
+      .finally(() => setLoadingDrawerMonths(false))
+  }, [drawerSelectedCity])
+
+  // Main page derived data
   const monthList = scanResult
-    ? Object.keys(scanResult.months).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
+    ? Object.entries(scanResult.months).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
     : []
 
   const employeeList = (scanResult && selectedMonth && scanResult.months[selectedMonth]?.employees)
     ? Object.entries(scanResult.months[selectedMonth].employees)
+        .filter(([, e]) => (e.totalFiles || 0) > 0)
         .map(([id, data]) => ({ id, totalFiles: data.totalFiles }))
         .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
     : []
@@ -76,79 +132,6 @@ export default function AttendanceSection() {
 
   const allFiles = Object.values(allDateFiles).flat()
 
-  // ── Month Picker ──
-
-  const openMonthPicker = async () => {
-    setLoadingMonths(true)
-    setShowRescanModal(false)
-    setShowMonthPicker(true)
-    setPickedMonths(new Set())
-    try {
-      const folders = await listAttendanceMonths(selectedCity)
-      setAvailableMonths(folders)
-    } catch {
-      setAvailableMonths([])
-    }
-    setLoadingMonths(false)
-  }
-
-  const toggleMonth = (month) => {
-    setPickedMonths(prev => {
-      const next = new Set(prev)
-      if (next.has(month)) next.delete(month)
-      else if (next.size < 3) next.add(month)
-      return next
-    })
-  }
-
-  const renderMonthPicker = () => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowMonthPicker(false)} />
-      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-        <button onClick={() => setShowMonthPicker(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
-          <X size={18} className="text-gray-400" />
-        </button>
-        <div className="flex flex-col gap-4">
-          <div>
-            <h3 className="text-lg font-bold text-gray-900 mb-1">Select Months to Scan</h3>
-            <p className="text-xs text-gray-500">Choose up to <span className="font-semibold text-amber-600">3 months</span> at a time. Each month scans all employee folders.</p>
-          </div>
-          {loadingMonths ? (
-            <div className="flex items-center justify-center py-8"><Loader2 size={20} className="animate-spin text-amber-500" /><span className="text-sm text-text-muted ml-2">Loading months...</span></div>
-          ) : availableMonths.length === 0 ? (
-            <div className="text-center py-8 text-sm text-text-muted">No months found</div>
-          ) : (
-            <div className="max-h-64 overflow-y-auto border border-gray-200 rounded-xl divide-y divide-gray-100">
-              {availableMonths.map(month => {
-                const isChecked = pickedMonths.has(month)
-                const isDisabled = !isChecked && pickedMonths.size >= 3
-                return (
-                  <button key={month} onClick={() => !isDisabled && toggleMonth(month)}
-                    className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-all ${isChecked ? 'bg-amber-50' : isDisabled ? 'opacity-40 cursor-not-allowed' : 'hover:bg-gray-50 cursor-pointer'}`}>
-                    {isChecked ? <CheckSquare size={18} className="text-amber-500 shrink-0" /> : <Square size={18} className="text-gray-300 shrink-0" />}
-                    <span className={`text-sm font-medium ${isChecked ? 'text-amber-700' : 'text-gray-700'}`}>{month}</span>
-                  </button>
-                )
-              })}
-            </div>
-          )}
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-gray-500">{pickedMonths.size}/3 selected</span>
-            <div className="flex items-center gap-2">
-              <button onClick={() => setShowMonthPicker(false)} className="px-4 py-2 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">Cancel</button>
-              <button onClick={() => handleScan([...pickedMonths])} disabled={pickedMonths.size === 0}
-                className="px-4 py-2 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25 disabled:opacity-50 disabled:cursor-not-allowed">
-                Start Scan ({pickedMonths.size})
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-
-  // ── Handlers ──
-
   function formatElapsed(seconds) {
     const h = Math.floor(seconds / 3600)
     const m = Math.floor((seconds % 3600) / 60)
@@ -158,40 +141,89 @@ export default function AttendanceSection() {
     return `${s}s`
   }
 
-  const handleScan = async (months) => {
-    setShowMonthPicker(false)
-    setScanning(true)
-    setScanProgress(null)
-    setElapsedTime(0)
-    timerRef.current = setInterval(() => setElapsedTime(t => t + 1), 1000)
+  const handleSingleMonthScan = async (city, month) => {
+    setScanningMonth(month)
+    setMonthScanProgress(null)
+    setMonthScanElapsed(0)
+    monthTimerRef.current = setInterval(() => setMonthScanElapsed(t => t + 1), 1000)
     try {
-      const result = await scanAttendanceCleanup(selectedCity, months, (progress) => {
-        setScanProgress(progress)
+      const result = await scanAttendanceCleanup(city, [month], (progress) => {
+        setMonthScanProgress(progress)
       })
-      setScanResult(result)
-      const firstMonth = Object.keys(result.months)
-        .sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-      if (firstMonth) {
-        setSelectedMonth(firstMonth)
-        setSelectedEmployee(null)
+      if (city === selectedCity) {
+        setScanResult(result)
+        const firstMonth = Object.entries(result.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+        if (firstMonth && !selectedMonth) setSelectedMonth(firstMonth)
       }
+      setDrawerScanData(prev => {
+        const next = prev ? JSON.parse(JSON.stringify(prev)) : { months: {} }
+        next.months[month] = result?.months?.[month] || { totalFiles: 0, totalSize: 0, employees: {} }
+        return next
+      })
     } catch {
       alert('Scan failed. Please try again.')
     }
-    clearInterval(timerRef.current)
-    setScanning(false)
+    clearInterval(monthTimerRef.current)
+    setScanningMonth(null)
+    setMonthScanProgress(null)
+  }
+
+  const handleScanAll = async () => {
+    const city = drawerSelectedCity
+    if (!city || drawerMonths.length === 0) return
+    setScanAllRunning(true)
+    setScanAllStopping(false)
+    stopScanAllRef.current = false
+
+    for (const month of drawerMonths) {
+      if (stopScanAllRef.current) break
+      if (drawerScanData?.months?.[month]) continue
+
+      setScanningMonth(month)
+      setMonthScanProgress(null)
+      setMonthScanElapsed(0)
+      monthTimerRef.current = setInterval(() => setMonthScanElapsed(t => t + 1), 1000)
+
+      try {
+        const result = await scanAttendanceCleanup(city, [month], (progress) => {
+          setMonthScanProgress(progress)
+        })
+        if (city === selectedCity) {
+          setScanResult(result)
+          const firstM = Object.entries(result.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+          if (firstM && !selectedMonth) setSelectedMonth(firstM)
+        }
+        setDrawerScanData(prev => {
+          const next = prev ? JSON.parse(JSON.stringify(prev)) : { months: {} }
+          next.months[month] = result?.months?.[month] || { totalFiles: 0, totalSize: 0, employees: {} }
+          return next
+        })
+      } catch {
+        // skip failed month
+      }
+
+      clearInterval(monthTimerRef.current)
+      setScanningMonth(null)
+      setMonthScanProgress(null)
+    }
+
+    setScanAllRunning(false)
+    setScanAllStopping(false)
+    stopScanAllRef.current = false
+  }
+
+  const stopScanAll = () => {
+    stopScanAllRef.current = true
+    setScanAllStopping(true)
   }
 
   const handleDeleteSelected = async () => {
     if (selectedFiles.size === 0) return
-    const confirmed = window.confirm(`Are you sure you want to delete ${selectedFiles.size} file(s)? This action cannot be undone.`)
-    if (!confirmed) return
     setDeleting(true)
     try {
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
       const failedSet = new Set(failed)
 
-      // Update allDateFiles
       setAllDateFiles(prev => {
         const next = {}
         for (const [date, files] of Object.entries(prev)) {
@@ -201,36 +233,48 @@ export default function AttendanceSection() {
       })
       setSelectedFiles(new Set(failed))
 
-      // Update scanResult counts
       if (scanResult && selectedMonth && selectedEmployee && deleted > 0) {
         const next = JSON.parse(JSON.stringify(scanResult))
         const empData = next.months[selectedMonth]?.employees[selectedEmployee]
         if (empData) {
           const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
-          for (const [date, dateData] of Object.entries(empData.dates || {})) {
-            if (dateData.filesMeta) {
-              dateData.filesMeta = dateData.filesMeta.filter(f => !deletedPaths.has(f.fullPath))
-            }
-            dateData.files = dateData.filesMeta?.length || 0
-            if (dateData.files <= 0) delete empData.dates[date]
+          for (const [date, files] of Object.entries(empData.dates || {})) {
+            empData.dates[date] = files.filter(f => !deletedPaths.has(f.fullPath))
+            if (!empData.dates[date].length) delete empData.dates[date]
           }
-          empData.totalFiles = Object.values(empData.dates || {}).reduce((s, d) => s + d.files, 0)
-          if (empData.totalFiles <= 0) delete next.months[selectedMonth].employees[selectedEmployee]
+          const empFiles = Object.values(empData.dates || {}).flat()
+          empData.totalFiles = empFiles.length
+          empData.totalSize = empFiles.reduce((s, f) => s + (f.size || 0), 0)
 
           const monthData = next.months[selectedMonth]
           if (monthData) {
             monthData.totalFiles = Object.values(monthData.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
-            if (monthData.totalFiles <= 0) delete next.months[selectedMonth]
+            monthData.totalSize = Object.values(monthData.employees || {}).reduce((s, e) => s + (e.totalSize || 0), 0)
           }
           next.totalFiles = Object.values(next.months || {}).reduce((s, m) => s + m.totalFiles, 0)
+          next.totalSize = Object.values(next.months || {}).reduce((s, m) => s + (m.totalSize || 0), 0)
         }
         setScanResult(next)
+        if (selectedCity === drawerSelectedCity) setDrawerScanData(next)
         saveAttendanceScanResult(selectedCity, next).catch(() => {})
+
+        // Auto-select next employee/month
+        const empStillHasData = next.months[selectedMonth]?.employees[selectedEmployee]?.totalFiles > 0
+        if (!empStillHasData) {
+          const nextEmp = Object.entries(next.months[selectedMonth]?.employees || {}).filter(([, e]) => (e.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          if (nextEmp) {
+            setSelectedEmployee(nextEmp)
+          } else {
+            // Month empty — next month
+            const nextMonth = Object.entries(next.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+            setSelectedMonth(nextMonth || null)
+            setSelectedEmployee(null)
+          }
+          setAllDateFiles({})
+        }
       }
 
-      if (failed.length > 0) {
-        alert(`${deleted} file(s) deleted. ${failed.length} file(s) failed.`)
-      }
+      if (failed.length > 0) alert(`${deleted} file(s) deleted. ${failed.length} file(s) failed.`)
     } catch {
       alert('Failed to delete files. Please try again.')
     }
@@ -247,11 +291,9 @@ export default function AttendanceSection() {
     return `${Math.floor(hrs / 24)}d ago`
   }
 
-  // ── Effects ──
-
-  // Load scan result when city changes
   useEffect(() => {
     if (!selectedCity) { setLoadingScanResult(false); return }
+    if (!initialLoadDone.current) return
     setLoadingScanResult(true)
     setScanResult(null)
     setSelectedMonth(null)
@@ -260,21 +302,18 @@ export default function AttendanceSection() {
     loadAttendanceScanResult(selectedCity).then(cached => {
       if (cached) {
         setScanResult(cached)
-        const firstMonth = Object.keys(cached.months || {})
-          .sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
+        const firstMonth = Object.entries(cached.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
         if (firstMonth) setSelectedMonth(firstMonth)
       }
     }).finally(() => setLoadingScanResult(false))
   }, [selectedCity])
 
-  // Auto-select first employee when month changes
   useEffect(() => {
     if (employeeList.length > 0 && !employeeList.find(e => e.id === selectedEmployee)) {
       setSelectedEmployee(employeeList[0].id)
     }
   }, [selectedMonth, employeeList.length])
 
-  // Load files from scanResult JSON — NO Firebase hit
   useEffect(() => {
     if (!selectedCity || !selectedMonth || !selectedEmployee || !scanResult) {
       setAllDateFiles({})
@@ -282,93 +321,255 @@ export default function AttendanceSection() {
     }
     setSelectedFiles(new Set())
     const empData = scanResult.months[selectedMonth]?.employees[selectedEmployee]
-    if (!empData?.dates) {
-      setAllDateFiles({})
-      return
-    }
+    if (!empData?.dates) { setAllDateFiles({}); return }
     const map = {}
-    for (const [date, dateData] of Object.entries(empData.dates)) {
-      map[date] = dateData.filesMeta || []
+    for (const [date, files] of Object.entries(empData.dates)) {
+      map[date] = Array.isArray(files) ? files : []
     }
     setAllDateFiles(map)
   }, [selectedCity, selectedMonth, selectedEmployee, scanResult])
 
+  // ── Drawer ──
+  const renderCityDrawer = () => {
+    const drawerCityIsOnMainPage = drawerSelectedCity ? mainPageCities.includes(drawerSelectedCity) : false
+    const scannedCount = drawerScanData?.months ? Object.keys(drawerScanData.months).length : 0
+    const cleanedCount = drawerScanData?.months ? Object.values(drawerScanData.months).filter(m => (m.totalFiles || 0) === 0).length : 0
+    const hasDataCount = scannedCount - cleanedCount
 
-  // ── Render ──
-
-  if (loadingScanResult) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <Loader2 size={20} className="animate-spin text-primary" />
-      </div>
-    )
-  }
+    <>
+      <div className={`fixed inset-0 z-50 transition-opacity duration-200 ${showCityDrawer ? 'opacity-100' : 'opacity-0 pointer-events-none'}`}>
+        <div className="absolute inset-0 bg-black/20 backdrop-blur-[2px]" onClick={() => !scanningMonth && setShowCityDrawer(false)} />
+        <div className={`absolute top-0 right-0 h-full w-[55vw] bg-gradient-to-b from-white to-slate-50/80 shadow-2xl transition-transform duration-300 ease-out flex flex-col ${showCityDrawer ? 'translate-x-0' : 'translate-x-full'}`}>
 
-  if (!scanResult && !scanning) {
-    return (
-      <>
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <CitySelector cities={attCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
-        <div className="w-16 h-16 rounded-2xl bg-amber-500/10 flex items-center justify-center">
-          <Search size={28} className="text-amber-500" />
-        </div>
-        <div className="text-center">
-          <h3 className="text-sm font-semibold text-text mb-1">No Scan Data</h3>
-          <p className="text-xs text-text-muted mb-1">Scan attendance folders to find old files for cleanup</p>
-        </div>
-        <button
-          onClick={openMonthPicker}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-amber-500 text-white hover:bg-amber-600 transition-all cursor-pointer shadow-sm"
-        >
-          <Search size={16} />
-          Scan Attendance
-        </button>
-      </div>
-      {showMonthPicker && renderMonthPicker()}
-      </>
-    )
-  }
-
-  if (scanning) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full gap-3">
-        <Loader2 size={28} className="animate-spin text-amber-500" />
-
-        {scanProgress?.month && (
-          <div className="text-center">
-            <span className="text-xs text-text-muted">Month</span>
-            <span className="text-sm font-bold text-amber-600 ml-1.5">{scanProgress.month}</span>
+          <div className="px-5 py-3.5 border-b border-slate-100 bg-white flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center shadow-sm">
+              <Settings2 size={14} className="text-white" />
+            </div>
+            <h3 className="text-[13px] font-bold text-slate-800 flex-1">City Setting</h3>
+            <button disabled={!!scanningMonth} onClick={() => setShowAvailableCities(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold text-amber-600 bg-amber-50 border border-amber-200/80 hover:bg-amber-100 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed">
+              <span className="text-sm leading-none">+</span> Add City
+            </button>
+            {savingCities && <Loader2 size={14} className="animate-spin text-amber-400" />}
+            <button disabled={!!scanningMonth} onClick={() => !scanningMonth && setShowCityDrawer(false)}
+              className={`w-7 h-7 rounded-lg flex items-center justify-center transition-colors ${scanningMonth ? 'opacity-30 cursor-not-allowed' : 'hover:bg-slate-100 cursor-pointer'}`}>
+              <X size={15} className="text-slate-400" />
+            </button>
           </div>
-        )}
 
-        {scanProgress?.employee && (
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-text-muted">Employee</span>
-            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">
-              {scanProgress.employee}
-            </span>
-          </div>
-        )}
+          <div className="flex flex-1 min-h-0">
+            <div className="w-[180px] shrink-0 border-r border-slate-100 bg-white/60 flex flex-col">
+              <div className="px-3 py-2 border-b border-slate-100">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">{includedCities.length} Cities</span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {includedCities.length === 0 ? (
+                  <p className="text-[10px] text-text-muted px-3 py-6 text-center">No cities yet</p>
+                ) : (
+                  includedCities.map((city) => {
+                    const isSelected = drawerSelectedCity === city
+                    const isOnPage = mainPageCities.includes(city)
+                    return (
+                      <button key={city} disabled={!!scanningMonth}
+                        onClick={() => !scanningMonth && setDrawerSelectedCity(city)}
+                        className={`w-full flex items-center gap-2 px-3 py-2.5 text-left transition-all border-l-2 ${
+                          scanningMonth ? (isSelected ? 'bg-amber-50/80 border-l-amber-500 text-amber-700 cursor-not-allowed' : 'border-l-transparent text-slate-400 cursor-not-allowed opacity-50')
+                            : isSelected ? 'bg-amber-50/80 border-l-amber-500 text-amber-700 cursor-pointer' : 'border-l-transparent hover:bg-slate-50 text-slate-600 cursor-pointer'
+                        }`}>
+                        <span className={`text-[11px] flex-1 truncate ${isSelected ? 'font-bold' : 'font-medium'}`}>{city}</span>
+                        {isOnPage && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />}
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            </div>
 
-        <div className="flex items-center gap-4 text-[11px]">
-          <div className="flex items-center gap-1.5 text-text-muted">
-            <Clock size={12} />
-            <span className="font-semibold text-amber-700">{formatElapsed(elapsedTime)}</span>
+            <div className="flex-1 flex flex-col overflow-hidden">
+              {!drawerSelectedCity ? (
+                <div className="flex-1 flex flex-col items-center justify-center gap-2">
+                  <div className="w-12 h-12 rounded-xl bg-slate-100 flex items-center justify-center">
+                    <MapPin size={20} className="text-slate-300" />
+                  </div>
+                  <p className="text-[11px] text-slate-400">Select a city to manage</p>
+                </div>
+              ) : (
+                <>
+                  <div className="px-5 py-3 border-b border-slate-100 bg-white">
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-[14px] font-bold text-slate-800 flex-1">{drawerSelectedCity}</h3>
+                      <button disabled={savingCities} onClick={() => toggleMainPage(drawerSelectedCity)}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer disabled:opacity-50 ${
+                          drawerCityIsOnMainPage ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/20 hover:bg-emerald-600' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200'
+                        }`}>
+                        {drawerCityIsOnMainPage ? '✓ On Page' : 'Show on Page'}
+                      </button>
+                      {!drawerCityIsOnMainPage && (
+                        <button disabled={savingCities} onClick={() => { removeCity(drawerSelectedCity); setDrawerSelectedCity(null) }}
+                          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[10px] font-semibold transition-all cursor-pointer disabled:opacity-50 text-red-400 border border-red-200/80 hover:bg-red-50 hover:text-red-600">
+                          <X size={11} /> Remove
+                        </button>
+                      )}
+                    </div>
+                    {drawerMonths.length > 0 && (
+                      <div className="mt-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden flex">
+                            {cleanedCount > 0 && <div className="h-full bg-emerald-400 transition-all" style={{ width: `${(cleanedCount / drawerMonths.length) * 100}%` }} />}
+                            {hasDataCount > 0 && <div className="h-full bg-amber-400 transition-all" style={{ width: `${(hasDataCount / drawerMonths.length) * 100}%` }} />}
+                          </div>
+                          <span className="text-[9px] text-slate-400 font-medium shrink-0">{scannedCount}/{drawerMonths.length}</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-emerald-400 shrink-0" /><span className="text-slate-500">{cleanedCount} Cleaned</span></div>
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-amber-400 shrink-0" /><span className="text-slate-500">{hasDataCount} Has Data</span></div>
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-slate-200 shrink-0" /><span className="text-slate-400">{drawerMonths.length - scannedCount} Pending</span></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="px-5 py-2 border-b border-slate-100 bg-slate-50/50 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-bold text-slate-500">Months</span>
+                      <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200/60 text-slate-500 font-semibold">{drawerMonths.length}</span>
+                      {drawerScanData?.months && scannedCount > 0 && !scanAllRunning && (
+                        <button onClick={() => {
+                          if (!window.confirm(`Reset scan data for ${drawerSelectedCity}?`)) return
+                          setDrawerScanData(null)
+                          saveAttendanceScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, totalSize: 0, months: {} })
+                          if (drawerSelectedCity === selectedCity) setScanResult(null)
+                        }} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-semibold text-red-400 hover:bg-red-50 border border-red-200/60 transition-all cursor-pointer">
+                          <RefreshCw size={8} /> Reset All
+                        </button>
+                      )}
+                    </div>
+                    {scanAllRunning ? (
+                      scanAllStopping ? (
+                        <span className="text-[9px] font-semibold text-amber-600 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">Stopping after {scanningMonth}...</span>
+                      ) : (
+                        <button onClick={stopScanAll} className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-semibold bg-red-500 text-white hover:bg-red-600 transition-all cursor-pointer shadow-sm">
+                          <X size={10} /> Stop Scanning
+                        </button>
+                      )
+                    ) : (
+                      <button disabled={!!scanningMonth} onClick={handleScanAll}
+                        className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[9px] font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-all cursor-pointer disabled:opacity-30 shadow-sm">
+                        <Search size={10} /> Start Scan
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto">
+                    {loadingDrawerMonths ? (
+                      <div className="flex items-center justify-center py-12 gap-2"><Loader2 size={16} className="animate-spin text-amber-400" /><span className="text-xs text-text-muted">Loading months...</span></div>
+                    ) : drawerMonths.length === 0 ? (
+                      <div className="text-center py-12 text-xs text-text-muted">No months found</div>
+                    ) : (
+                      <div className="grid grid-cols-4 gap-2 p-3">
+                        {drawerMonths.map((month) => {
+                          const monthData = drawerScanData?.months?.[month]
+                          const isScanned = !!monthData
+                          const isCleaned = isScanned && (monthData.totalFiles || 0) === 0
+                          const hasData = isScanned && (monthData.totalFiles || 0) > 0
+                          const isThisScanning = scanningMonth === month
+                          return (
+                            <div key={month} className={`relative rounded-xl border p-3 transition-all ${
+                              isThisScanning ? 'border-amber-300 bg-amber-50 shadow-sm' : isCleaned ? 'border-emerald-200 bg-emerald-50/40' : hasData ? 'border-amber-200 bg-amber-50/30' : 'border-slate-200 bg-white hover:shadow-sm'
+                            }`}>
+                              {!isThisScanning && isScanned && !scanningMonth && (
+                                resettingMonth === month ? (
+                                  <div className="absolute top-1.5 right-1.5"><Loader2 size={10} className="animate-spin text-amber-500" /></div>
+                                ) : (
+                                  <button disabled={!!resettingMonth} onClick={async () => {
+                                    setResettingMonth(month)
+                                    const result = await loadAttendanceScanResult(drawerSelectedCity)
+                                    if (result?.months?.[month]) {
+                                      delete result.months[month]
+                                      result.totalFiles = Object.values(result.months).reduce((s, m) => s + m.totalFiles, 0)
+                                      await saveAttendanceScanResult(drawerSelectedCity, result)
+                                      if (drawerSelectedCity === selectedCity) setScanResult(result)
+                                    }
+                                    setDrawerScanData(prev => {
+                                      if (!prev) return prev
+                                      const next = JSON.parse(JSON.stringify(prev))
+                                      delete next.months[month]
+                                      return next
+                                    })
+                                    setResettingMonth(null)
+                                  }} className="absolute top-1.5 right-1.5 text-[7px] font-semibold text-slate-300 hover:text-red-500 transition-colors cursor-pointer disabled:opacity-30">✕</button>
+                                )
+                              )}
+                              <div className="flex items-center gap-1.5 mb-2">
+                                {isThisScanning ? <Loader2 size={11} className="animate-spin text-amber-500 shrink-0" />
+                                  : isCleaned ? <Check size={11} className="text-emerald-500 shrink-0" strokeWidth={3} />
+                                  : hasData ? <span className="w-2 h-2 rounded-full bg-amber-400 shrink-0" />
+                                  : <span className="w-2 h-2 rounded-full bg-slate-200 shrink-0" />}
+                                <span className={`text-[11px] font-bold truncate ${isThisScanning ? 'text-amber-700' : isCleaned ? 'text-emerald-600' : hasData ? 'text-slate-700' : 'text-slate-400'}`}>{month}</span>
+                              </div>
+                              {isThisScanning ? (
+                                <div className="flex items-center gap-2 text-[8px] flex-wrap">
+                                  <span className="font-semibold text-amber-600">{formatElapsed(monthScanElapsed)}</span>
+                                  {monthScanProgress?.filesFound > 0 && <span className="font-bold text-emerald-600">{monthScanProgress.filesFound} · {formatSize(monthScanProgress.totalSize || 0)}</span>}
+                                  {monthScanProgress?.hits > 0 && <span className="text-sky-500">{monthScanProgress.hits} hits</span>}
+                                </div>
+                              ) : hasData ? (
+                                <div className="text-[9px] font-semibold text-amber-600">{monthData.totalFiles} files · {formatSize(monthData.totalSize || 0)}</div>
+                              ) : isCleaned ? (
+                                <div className="text-[9px] font-semibold text-emerald-500">Cleaned ✓</div>
+                              ) : (
+                                <div className="text-[9px] text-slate-400">Pending</div>
+                              )}
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
-          {scanProgress?.filesFound > 0 && (
-            <span className="text-text-muted">
-              <span className="font-bold text-emerald-600">{scanProgress.filesFound}</span> files
-            </span>
+
+          {showAvailableCities && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center p-6">
+              <div className="absolute inset-0 bg-black/20" onClick={() => setShowAvailableCities(false)} />
+              <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[70vh] flex flex-col animate-[slideUp_0.2s_ease-out]">
+                <div className="flex items-center justify-between px-4 py-3 border-b border-surface-lighter">
+                  <h4 className="text-sm font-bold text-text">Available Cities ({availableCities.length})</h4>
+                  <button onClick={() => setShowAvailableCities(false)} className="p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"><X size={16} className="text-gray-400" /></button>
+                </div>
+                <div className="p-3 overflow-y-auto flex-1">
+                  {availableCities.length === 0 ? (
+                    <p className="text-xs text-text-muted text-center py-4">All cities already included</p>
+                  ) : (
+                    <div className="flex flex-wrap gap-1.5">
+                      {availableCities.map(city => (
+                        <button key={city} disabled={savingCities} onClick={() => addCity(city)}
+                          className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition-all cursor-pointer disabled:opacity-50 bg-surface-light text-slate-500 border border-slate-200 hover:bg-amber-50 hover:text-amber-600 hover:border-amber-200">
+                          <span className="text-amber-400 text-xs">+</span>
+                          {city}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
           )}
-          {scanProgress?.hits > 0 && (
-            <span className="text-text-muted">
-              <span className="font-bold text-sky-600">{scanProgress.hits}</span> API hits
-            </span>
-          )}
         </div>
       </div>
-    )
+    </>
+  )}
+
+  if (loadingCities || loadingScanResult) {
+    return <div className="flex items-center justify-center h-full"><Loader2 size={20} className="animate-spin text-primary" /></div>
   }
+
+  const noCity = mainPageCities.length === 0
+  const hasData = !noCity && !!scanResult
+  const noData = !noCity && !scanResult
 
   return (
     <>
@@ -378,114 +579,125 @@ export default function AttendanceSection() {
     }}>
     <style>{`@keyframes spin-border { to { --border-angle: 360deg; } } @property --border-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }`}</style>
     <div className="flex flex-col h-full rounded-[10px] overflow-hidden bg-white">
-      {/* Top strip */}
-      <div className="flex items-center justify-between px-4 py-2.5 border-b border-surface-lighter bg-surface">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-text">Attendance</h3>
-          <span className="text-[10px] font-medium px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 border border-amber-500/20">
-            {scanResult.totalFiles} files
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {scanResult.scannedAt && (
-            <span className="text-[9px] text-text-muted">{timeAgo(scanResult.scannedAt)}</span>
+      <div className="flex items-center px-4 py-2 border-b border-slate-100 bg-white">
+        <div className="flex items-center gap-2.5 shrink-0">
+          <div className="w-7 h-7 rounded-lg bg-gradient-to-br from-amber-500 to-orange-500 flex items-center justify-center">
+            <ClipboardList size={13} className="text-white" />
+          </div>
+          <h3 className="text-[13px] font-bold text-slate-800">Attendance</h3>
+          {hasData && (
+            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200/60">
+              <span className="text-[10px] font-bold text-amber-600">{scanResult.totalFiles}</span>
+              <span className="text-[9px] text-amber-400">files</span>
+              <span className="text-[9px] text-amber-300">·</span>
+              <span className="text-[10px] font-semibold text-amber-500">{formatSize(scanResult.totalSize || 0)}</span>
+            </div>
           )}
-          <button
-            onClick={() => setShowRescanModal(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-amber-500/10 text-amber-600 border border-amber-500/20 hover:bg-amber-500/20"
-          >
-            <RefreshCw size={12} />
-            Re Scan
+        </div>
+        <div className="flex-1 flex items-center justify-center gap-1.5 mx-4">
+          {mainPageCities.map(city => (
+            <button key={city} onClick={() => setSelectedCity(city)}
+              className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                selectedCity === city ? 'bg-amber-500 text-white shadow-md shadow-amber-500/20' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-amber-50 hover:text-amber-600 hover:border-amber-200'
+              }`}>
+              {city}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {hasData && scanResult.scannedAt && (
+            <span className="text-[9px] text-slate-400 flex items-center gap-1"><Clock size={10} />{timeAgo(scanResult.scannedAt)}</span>
+          )}
+          <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-slate-50 text-slate-600 border border-slate-200 hover:bg-amber-50 hover:text-amber-600 hover:border-amber-200">
+            <Settings2 size={12} /> City Setting
           </button>
-          <div className="w-px h-5 bg-surface-lighter" />
-          <CitySelector cities={attCities} selectedCity={selectedCity} onSelect={setSelectedCity} compact />
         </div>
       </div>
 
-      {/* Body */}
-      <div className="flex flex-1 min-h-0">
-        {/* Left: Employee list */}
-        <div className="w-22 shrink-0 border-r border-surface-lighter flex flex-col bg-gray-100">
-          <div className="flex-1 overflow-y-auto">
-            {employeeList.length === 0 ? (
-              <div className="flex items-center justify-center h-full text-text-muted text-xs">No employees</div>
-            ) : (
-              <div className="flex flex-col">
-                {employeeList.map((emp, idx) => {
-                  const isSelected = selectedEmployee === emp.id
-                  return (
-                    <div key={emp.id}>
-                      {idx > 0 && <hr className="border-surface-lighter" />}
-                      <button
-                        onClick={() => { setSelectedEmployee(emp.id); setAllDateFiles({}) }}
-                        className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer ${
-                          isSelected ? 'bg-gray-200 border-r-2 border-gray-500' : 'hover:bg-gray-200/50'
-                        }`}
-                      >
-                        <div className={`text-[11px] font-semibold truncate ${isSelected ? 'text-gray-800' : 'text-text'}`}>
-                          {emp.id}
-                        </div>
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
+      {noCity ? (
+        <div className="flex flex-col items-center justify-center flex-1 gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-slate-100 to-slate-50 flex items-center justify-center border border-slate-200/50">
+            <Settings2 size={26} className="text-slate-300" />
+          </div>
+          <div className="text-center">
+            <h3 className="text-sm font-bold text-slate-700 mb-1">No city on page</h3>
+            <p className="text-[11px] text-slate-400 max-w-xs">Open <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }} className="font-bold text-amber-500 hover:text-amber-600 cursor-pointer underline underline-offset-2">City Setting</button> and mark cities as "Show on Page"</p>
           </div>
         </div>
+      ) : noData ? (
+        <div className="flex flex-col items-center justify-center flex-1 gap-4">
+          <div className="w-16 h-16 rounded-2xl bg-gradient-to-br from-amber-100 to-amber-50 flex items-center justify-center border border-amber-200/50">
+            <Search size={26} className="text-amber-300" />
+          </div>
+          <div className="text-center">
+            <h3 className="text-sm font-bold text-slate-700 mb-1">{selectedCity ? `No scan data for ${selectedCity}` : 'No Scan Data'}</h3>
+            <p className="text-[11px] text-slate-400 max-w-xs">Open <button onClick={() => { setShowCityDrawer(true); setDrawerSelectedCity(selectedCity) }} className="font-bold text-amber-500 hover:text-amber-600 cursor-pointer underline underline-offset-2">City Setting</button> → select months → Start Scan</p>
+          </div>
+        </div>
+      ) : (
+      <div className="flex flex-1 min-h-0">
+        {/* Month + Employee sidebar */}
+        <div className="w-[100px] shrink-0 border-r border-slate-100 bg-slate-50/50 flex flex-col">
+          <div className="px-3 py-2 border-b border-slate-100">
+            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Months</span>
+          </div>
+          <div className="overflow-y-auto border-b border-slate-100">
+            {monthList.map(month => (
+              <button key={month} onClick={() => { setSelectedMonth(month); setSelectedEmployee(null); setAllDateFiles({}) }}
+                className={`w-full px-3 py-2 text-left transition-all cursor-pointer border-l-2 ${
+                  selectedMonth === month ? 'bg-white border-l-amber-500 text-amber-700' : 'border-l-transparent text-slate-500 hover:bg-white/80'
+                }`}>
+                <span className={`text-[10px] block ${selectedMonth === month ? 'font-bold' : 'font-medium'}`}>{month}</span>
+              </button>
+            ))}
+          </div>
+          {selectedMonth && (
+            <>
+              <div className="px-3 py-2 border-b border-slate-100">
+                <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Employees</span>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                {employeeList.map(emp => (
+                  <button key={emp.id} onClick={() => { setSelectedEmployee(emp.id); setAllDateFiles({}) }}
+                    className={`w-full px-3 py-1.5 text-left transition-all cursor-pointer border-l-2 ${
+                      selectedEmployee === emp.id ? 'bg-white border-l-amber-500 text-amber-700' : 'border-l-transparent text-slate-500 hover:bg-white/80'
+                    }`}>
+                    <span className={`text-[10px] block truncate ${selectedEmployee === emp.id ? 'font-bold' : 'font-medium'}`}>{emp.id}</span>
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
 
-        {/* Right: Content */}
+        {/* Main content */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
           {!selectedMonth ? (
-            <div className="flex items-center justify-center h-full text-text-muted text-sm">Select a month</div>
+            <div className="flex items-center justify-center h-full"><span className="text-[11px] text-slate-400">← Select a month</span></div>
+          ) : !selectedEmployee ? (
+            <div className="flex items-center justify-center h-full"><span className="text-[11px] text-slate-400">← Select an employee</span></div>
           ) : (
             <>
-              <div className="px-4 pt-3 space-y-3">
-                {/* Month pills */}
+              <div className="px-4 py-2.5 border-b border-slate-100 bg-white">
                 <div className="flex items-center gap-2 flex-wrap">
-                  {monthList.map(month => {
-                    const isActive = selectedMonth === month
-                    const mData = scanResult.months[month]
-                    return (
-                      <button
-                        key={month}
-                        onClick={() => { setSelectedMonth(month); setSelectedEmployee(null); setAllDateFiles({}) }}
-                        className={`px-2.5 py-1 rounded-md text-[10px] font-semibold transition-all cursor-pointer ${
-                          isActive ? 'bg-primary text-white shadow-sm' : 'bg-primary/8 text-primary border border-primary/20 hover:bg-primary/15'
-                        }`}
-                      >
-                        {month} ({mData.totalFiles})
-                      </button>
-                    )
-                  })}
-                  {selectedEmployee && Object.keys(allDateFiles).length > 0 && (
-                    <span className="text-[9px] text-text-muted">
-                      · {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}
-                    </span>
+                  <span className="text-[11px] font-bold text-slate-700">Employee {selectedEmployee}</span>
+                  {Object.keys(allDateFiles).length > 0 && (
+                    <span className="text-[9px] text-slate-400 font-medium">· {allFiles.length} files · {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}</span>
                   )}
                   <div className="flex items-center gap-1.5 ml-auto">
                     {selectedFiles.size > 0 && (
-                      <button
-                        onClick={handleDeleteSelected}
-                        disabled={deleting}
-                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer bg-danger/10 text-danger border border-danger/20 hover:bg-danger/20 disabled:opacity-50"
-                      >
+                      <button onClick={handleDeleteSelected} disabled={deleting}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-red-500 text-white hover:bg-red-600 shadow-sm disabled:opacity-50">
                         {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                        {deleting ? 'Deleting...' : `Delete (${selectedFiles.size})`}
+                        {deleting ? 'Deleting...' : `Delete ${selectedFiles.size} files`}
                       </button>
                     )}
                     {allFiles.length > 0 && (
-                      <button
-                        onClick={() => {
-                          if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set())
-                          else setSelectedFiles(new Set(allFiles.map(f => f.fullPath)))
-                        }}
-                        className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all cursor-pointer ${
-                          selectedFiles.size === allFiles.length && allFiles.length > 0
-                            ? 'bg-primary text-white'
-                            : 'bg-surface border border-surface-lighter text-text-muted hover:border-primary/30'
-                        }`}
-                      >
+                      <button onClick={() => { if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set()); else setSelectedFiles(new Set(allFiles.map(f => f.fullPath))) }}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                          selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'bg-amber-500 text-white' : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-amber-50'
+                        }`}>
                         {selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'Deselect All' : 'Select All'}
                       </button>
                     )}
@@ -493,137 +705,61 @@ export default function AttendanceSection() {
                 </div>
               </div>
 
-              {/* Date cards grid */}
-              {selectedEmployee ? (
-                <div className="flex-1 overflow-y-auto mt-3 border-t border-surface-lighter p-4">
-                  {dateList.length === 0 ? (
-                    <div className="flex items-center justify-center h-32 text-text-muted text-xs">No dates found</div>
-                  ) : (
-                    <div className="grid grid-cols-5 gap-2">
-                      {dateList.map(([date]) => {
-                        const files = allDateFiles[date] || []
-                        return (
-                          <div key={date} className="rounded-[5px] border border-surface-lighter overflow-hidden">
-                            <div className="px-2 py-1.5 flex items-center justify-between bg-gray-100">
+              <div className="flex-1 overflow-y-auto p-4 bg-slate-50/30">
+                {dateList.length === 0 ? (
+                  <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No dates found</div>
+                ) : (
+                  <div className="grid grid-cols-5 gap-2.5">
+                    {dateList.map(([date]) => {
+                      const files = allDateFiles[date] || []
+                      const allChecked = files.length > 0 && files.every(f => selectedFiles.has(f.fullPath))
+                      return (
+                        <div key={date} className={`rounded-xl border overflow-hidden transition-all ${allChecked ? 'border-amber-300 bg-amber-50/30 shadow-sm' : 'border-slate-200/80 bg-white hover:shadow-sm'}`}>
+                          <div className="px-2.5 py-2 flex items-center justify-between bg-gradient-to-r from-slate-50 to-transparent">
+                            <div className="flex items-center gap-1.5">
+                              <Calendar size={11} className="text-slate-400" />
+                              <span className="text-[10px] font-bold text-slate-700">{date}</span>
+                            </div>
+                            {files.length > 0 && (
                               <div className="flex items-center gap-1.5">
-                                <Calendar size={12} className="text-gray-500" />
-                                <span className="text-[10px] font-semibold text-gray-700">{date}</span>
+                                <span className="text-[8px] text-slate-400 font-medium">{formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}</span>
+                                <input type="checkbox" className="w-3.5 h-3.5 rounded accent-amber-500 cursor-pointer" checked={allChecked}
+                                  onChange={(e) => { setSelectedFiles(prev => { const next = new Set(prev); files.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) }); return next }) }} />
                               </div>
-                              {files.length > 0 && (
-                                <div className="flex items-center gap-1.5">
-                                  <span className="text-[8px] text-gray-500">
-                                    {formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}
-                                  </span>
-                                  <input
-                                    type="checkbox"
-                                    className="w-3 h-3 rounded accent-primary cursor-pointer"
-                                    checked={files.every(f => selectedFiles.has(f.fullPath))}
-                                    onChange={(e) => {
-                                      setSelectedFiles(prev => {
-                                        const next = new Set(prev)
-                                        files.forEach(f => {
-                                          if (e.target.checked) next.add(f.fullPath)
-                                          else next.delete(f.fullPath)
-                                        })
-                                        return next
-                                      })
-                                    }}
-                                  />
-                                </div>
-                              )}
-                            </div>
-                            <div className="p-2 bg-white">
-                              {files.length === 0 ? (
-                                <div className="text-center py-1 text-text-muted text-[9px]">No files</div>
-                              ) : (
-                                <div className="flex gap-1 overflow-x-auto justify-center">
-                                  {files.map(file => {
-                                    const type = file.source === 'in' ? 'In' : file.source === 'out' ? 'Out' : '—'
-                                    return (
-                                      <div
-                                        key={file.fullPath}
-                                        className="flex-shrink-0 flex flex-col gap-0.5 p-1 rounded-md bg-surface-light/50 border border-surface-lighter hover:border-primary/30 transition-all group overflow-hidden"
-                                      >
-                                        {file.url ? (
-                                          <img src={file.url} alt="" className="w-[80px] h-[80px] object-cover rounded bg-surface" loading="lazy" />
-                                        ) : (
-                                          <div className="flex flex-col items-center justify-center w-[80px] h-[80px] bg-surface-light rounded">
-                                            <FileImage size={12} className="text-primary/40 group-hover:text-primary/70 transition-colors" />
-                                            <span className="text-[8px] text-text-muted mt-1">{formatSize(file.size)}</span>
-                                            <span className={`text-[7px] font-medium mt-0.5 ${
-                                              type === 'In' ? 'text-emerald-600' : type === 'Out' ? 'text-orange-600' : 'text-gray-400'
-                                            }`}>{type}</span>
-                                          </div>
-                                        )}
-                                      </div>
-                                    )
-                                  })}
-                                </div>
-                              )}
-                            </div>
+                            )}
                           </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div className="flex items-center justify-center flex-1 text-text-muted text-sm">Select an employee</div>
-              )}
+                          <div className="px-2 py-2">
+                            {files.length === 0 ? (
+                              <div className="text-center py-2 text-slate-300 text-[9px]">Empty</div>
+                            ) : (
+                              <div className="flex gap-1.5 overflow-x-auto justify-center">
+                                {files.map(file => {
+                                  const type = file.source === 'in' ? 'In' : file.source === 'out' ? 'Out' : '—'
+                                  return (
+                                    <div key={file.fullPath} className="flex-shrink-0 flex flex-col items-center justify-center gap-1 p-1.5 rounded-lg bg-slate-50 border border-slate-100 w-[55px] h-[45px]">
+                                      <FileImage size={11} className="text-amber-400/60" />
+                                      <span className="text-[7px] text-slate-400 font-medium">{type}</span>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>
       </div>
+      )}
     </div>
     </div>
 
-    {/* Re-scan Confirmation Modal */}
-    {showRescanModal && (
-      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        <div className="absolute inset-0 bg-black/50 backdrop-blur-sm animate-[fadeIn_0.2s_ease-out]" onClick={() => setShowRescanModal(false)} />
-        <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-[slideUp_0.3s_ease-out]">
-          <button onClick={() => setShowRescanModal(false)} className="absolute top-4 right-4 p-1 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer">
-            <X size={18} className="text-gray-400" />
-          </button>
-          <div className="flex flex-col items-center text-center gap-4">
-            <div className="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center">
-              <AlertTriangle size={28} className="text-amber-500" />
-            </div>
-            <div>
-              <h3 className="text-lg font-bold text-gray-900 mb-2">Re-scan Confirmation</h3>
-              <p className="text-sm text-gray-600 leading-relaxed">
-                This scans <span className="font-semibold text-amber-600">all employee folders</span> per month.
-                It will take <span className="font-semibold">significantly longer</span> for months with many employees.
-              </p>
-            </div>
-            <div className="w-full bg-amber-50 border border-amber-200 rounded-xl p-4 space-y-2">
-              <div className="flex items-start gap-2.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Each scan reads metadata of every file — <span className="font-semibold">increases API costs</span></p>
-              </div>
-              <div className="flex items-start gap-2.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Avoid scanning repeatedly — only re-scan when new data has been added</p>
-              </div>
-              <div className="flex items-start gap-2.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 mt-1.5 shrink-0" />
-                <p className="text-xs text-amber-800 text-left">Selected months will be replaced with fresh data, other months stay intact</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3 w-full pt-2">
-              <button onClick={() => setShowRescanModal(false)} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-gray-700 bg-gray-100 hover:bg-gray-200 transition-colors cursor-pointer">
-                Cancel
-              </button>
-              <button onClick={openMonthPicker} className="flex-1 px-4 py-2.5 rounded-xl text-sm font-medium text-white bg-amber-500 hover:bg-amber-600 transition-colors cursor-pointer shadow-lg shadow-amber-500/25">
-                Continue
-              </button>
-            </div>
-          </div>
-        </div>
-      </div>
-    )}
-
-    {showMonthPicker && renderMonthPicker()}
+    {renderCityDrawer()}
 
     <style>{`
       @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }

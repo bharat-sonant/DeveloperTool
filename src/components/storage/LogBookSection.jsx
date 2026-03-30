@@ -1,7 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, X, Clock, Settings2, Check, MapPin, BookOpen } from 'lucide-react'
 import { deleteStorageFiles, listLogBookWards, scanLogBookImages, saveLogBookScanResult, loadLogBookScanResult, resolveCommonCities, loadLogBookCities, saveLogBookCities } from '../../lib/firebase'
-import { formatSize } from './utils'
 
 export default function LogBookSection() {
   // City selection
@@ -128,7 +127,7 @@ export default function LogBookSection() {
     const list = []
     for (const [year, yearData] of Object.entries(scanResult.wards[selectedWard].years)) {
       for (const [month, monthData] of Object.entries(yearData.months)) {
-        list.push({ year, month, totalFiles: monthData.totalFiles, totalSize: monthData.totalSize || 0, key: `${year}-${month}` })
+        list.push({ year, month, totalFiles: monthData.totalFiles, key: `${year}-${month}` })
       }
     }
     return list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_ORDER[b.month] || 0) - (MONTH_ORDER[a.month] || 0))
@@ -169,7 +168,7 @@ export default function LogBookSection() {
       }
       setDrawerScanData(prev => {
         const next = prev ? JSON.parse(JSON.stringify(prev)) : { wards: {} }
-        next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, totalSize: 0, years: {} }
+        next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, years: {} }
         return next
       })
     } catch {
@@ -207,7 +206,7 @@ export default function LogBookSection() {
         }
         setDrawerScanData(prev => {
           const next = prev ? JSON.parse(JSON.stringify(prev)) : { wards: {} }
-          next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, totalSize: 0, years: {} }
+          next.wards[ward] = result?.wards?.[ward] || { totalFiles: 0, years: {} }
           return next
         })
       } catch {
@@ -254,27 +253,18 @@ export default function LogBookSection() {
             monthData.dates[date] = files.filter(f => !deletedPaths.has(f.fullPath))
             if (!monthData.dates[date].length) delete monthData.dates[date]
           }
-          const recalc = (dates) => {
-            const files = Object.values(dates || {}).flat()
-            return { totalFiles: files.length, totalSize: files.reduce((s, f) => s + (f.size || 0), 0) }
-          }
-          const mc = recalc(monthData.dates)
-          monthData.totalFiles = mc.totalFiles
-          monthData.totalSize = mc.totalSize
+          monthData.totalFiles = Object.values(monthData.dates || {}).flat().length
           if (monthData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear].months[selectedMonth]
           const yearData = next.wards[selectedWard]?.years[selectedYear]
           if (yearData) {
             yearData.totalFiles = Object.values(yearData.months || {}).reduce((s, m) => s + m.totalFiles, 0)
-            yearData.totalSize = Object.values(yearData.months || {}).reduce((s, m) => s + (m.totalSize || 0), 0)
             if (yearData.totalFiles <= 0) delete next.wards[selectedWard].years[selectedYear]
           }
           const wardData = next.wards[selectedWard]
           if (wardData) {
             wardData.totalFiles = Object.values(wardData.years || {}).reduce((s, y) => s + y.totalFiles, 0)
-            wardData.totalSize = Object.values(wardData.years || {}).reduce((s, y) => s + (y.totalSize || 0), 0)
           }
           next.totalFiles = Object.values(next.wards || {}).reduce((s, w) => s + w.totalFiles, 0)
-          next.totalSize = Object.values(next.wards || {}).reduce((s, w) => s + (w.totalSize || 0), 0)
         }
         setScanResult(next)
         // Sync drawer scan data if same city
@@ -520,7 +510,7 @@ export default function LogBookSection() {
                           onClick={() => {
                             if (!window.confirm(`Reset scan data for ${drawerSelectedCity}?`)) return
                             setDrawerScanData(null)
-                            saveLogBookScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, totalSize: 0, wards: {} })
+                            saveLogBookScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, wards: {} })
                             if (drawerSelectedCity === selectedCity) setScanResult(null)
                           }}
                           className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-semibold text-red-400 hover:bg-red-50 border border-red-200/60 transition-all cursor-pointer"
@@ -632,14 +622,11 @@ export default function LogBookSection() {
                                 <div className="flex items-center gap-2 text-[8px] flex-wrap">
                                   <span className="font-semibold text-violet-600">{formatElapsed(wardScanElapsed)}</span>
                                   {wardScanProgress?.filesFound > 0 && (
-                                    <span className="font-bold text-emerald-600">{wardScanProgress.filesFound} · {formatSize(wardScanProgress.totalSize || 0)}</span>
-                                  )}
-                                  {wardScanProgress?.hits > 0 && (
-                                    <span className="text-sky-500">{wardScanProgress.hits} hits</span>
+                                    <span className="text-emerald-600">{wardScanProgress.filesFound} found</span>
                                   )}
                                 </div>
                               ) : hasData ? (
-                                <div className="text-[9px] font-semibold text-amber-600">{wardData.totalFiles} files · {formatSize(wardData.totalSize || 0)}</div>
+                                <div className="text-[9px] font-semibold text-amber-600">Has data</div>
                               ) : isCleaned ? (
                                 <div className="text-[9px] font-semibold text-emerald-500">Cleaned ✓</div>
                               ) : (
@@ -717,14 +704,6 @@ export default function LogBookSection() {
             <BookOpen size={13} className="text-white" />
           </div>
           <h3 className="text-[13px] font-bold text-slate-800">LogBook</h3>
-          {hasData && (
-            <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-violet-50 border border-violet-200/60">
-              <span className="text-[10px] font-bold text-violet-600">{scanResult.totalFiles}</span>
-              <span className="text-[9px] text-violet-400">files</span>
-              <span className="text-[9px] text-violet-300">·</span>
-              <span className="text-[10px] font-semibold text-violet-500">{formatSize(scanResult.totalSize || 0)}</span>
-            </div>
-          )}
         </div>
         <div className="flex-1 flex items-center justify-center gap-1.5 mx-4">
           {mainPageCities.map(city => (
@@ -828,13 +807,10 @@ export default function LogBookSection() {
                             ? 'bg-violet-500 text-white shadow-sm'
                             : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-violet-50 hover:text-violet-600'
                         }`}>
-                        {ym.month} {ym.year} <span className={`${isActive ? 'text-violet-200' : 'text-slate-400'}`}>({ym.totalFiles})</span>
+                        {ym.month} {ym.year}
                       </button>
                     )
                   })}
-                  {selectedMonth && Object.keys(allDateFiles).length > 0 && (
-                    <span className="text-[9px] text-slate-400 font-medium">· {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}</span>
-                  )}
                   <div className="flex items-center gap-1.5 ml-auto">
                     {selectedFiles.size > 0 && (
                       <button onClick={handleDeleteSelected} disabled={deleting}
@@ -878,7 +854,6 @@ export default function LogBookSection() {
                               </div>
                               {files.length > 0 && (
                                 <div className="flex items-center gap-1.5">
-                                  <span className="text-[8px] text-slate-400 font-medium">{formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}</span>
                                   <input type="checkbox" className="w-3.5 h-3.5 rounded accent-violet-500 cursor-pointer"
                                     checked={allChecked}
                                     onChange={(e) => { setSelectedFiles(prev => { const next = new Set(prev); files.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) }); return next }) }} />
@@ -893,7 +868,6 @@ export default function LogBookSection() {
                                   {files.map(file => (
                                     <div key={file.fullPath} className="flex-shrink-0 flex flex-col items-center justify-center gap-1 p-1.5 rounded-lg bg-slate-50 border border-slate-100 w-[55px] h-[45px]">
                                       <FileImage size={11} className="text-violet-400/60" />
-                                      <span className="text-[7px] text-slate-400 font-medium">{formatSize(file.size)}</span>
                                     </div>
                                   ))}
                                 </div>
