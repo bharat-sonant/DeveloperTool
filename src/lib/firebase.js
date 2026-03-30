@@ -223,9 +223,10 @@ export async function listAttendanceMonths(cityPath) {
     .sort((a, b) => (MONTH_SORT_ORDER[a] || 99) - (MONTH_SORT_ORDER[b] || 99))
 }
 
-/** Scan selected months — stores fullPath + size + source only, merges with existing */
+/** Scan selected months via REST API — collects employee IDs per month */
 export async function scanAttendanceCleanup(cityPath, selectedMonths, onProgress) {
   ensureStorage()
+  const bucket = firebaseConfig.storageBucket
   const basePath = `${cityPath}/AttendanceManagement`
 
   const now = new Date()
@@ -243,83 +244,55 @@ export async function scanAttendanceCleanup(cityPath, selectedMonths, onProgress
     city: cityPath,
     scannedAt: now.toISOString(),
     totalFiles: 0,
-    totalSize: 0,
-    months: existing?.months || {},
-  }
-  for (const month of selectedMonths) {
-    delete scanData.months[month]
+    employees: existing?.employees || {},
+    scannedMonths: existing?.scannedMonths || [],
   }
 
-  let hitCount = 0
-  const progress = { month: '', employee: '', hits: 0, filesFound: 0, totalSize: 0, lastFile: '' }
-  const updateProgress = (updates) => {
-    Object.assign(progress, updates)
-    if (onProgress) onProgress({ ...progress })
-  }
+  const progress = { month: '', filesFound: 0 }
+  const emit = (updates) => { Object.assign(progress, updates); onProgress?.({ ...progress }) }
 
   for (const month of selectedMonths) {
-    updateProgress({ month, employee: '', lastFile: '' })
-    const monthData = { totalFiles: 0, totalSize: 0, employees: {} }
+    emit({ month })
 
-    hitCount++
-    updateProgress({ hits: hitCount })
-    const empResult = await listAll(storageRef(storage, `${basePath}/${month}`))
+    // REST API: fetch ALL files under this month
+    const prefix = `${basePath}/${month}/`
+    const allFiles = await listAllFilesByPrefix(bucket, prefix, (count) => {
+      emit({ filesFound: count })
+    })
 
-    for (const empRef of empResult.prefixes) {
-      const empId = empRef.name
-      hitCount++
-      updateProgress({ employee: empId, hits: hitCount })
+    // Parse paths: {city}/AttendanceManagement/{month}/{employee}/{filename}
+    // filename: 2025-04-15_InImage.jpg → year = 2025, yearMonth = 2025-04
+    const monthParts = prefix.split('/').filter(Boolean).length
+    for (const file of allFiles) {
+      const parts = file.fullPath.split('/')
+      if (parts.length < monthParts + 2) continue
+      const empId = parts[monthParts]
+      const fileName = parts[parts.length - 1]
 
-      const filesResult = await listAll(storageRef(storage, empRef.fullPath))
-      const empData = { totalFiles: 0, totalSize: 0, dates: {} }
+      const dateMatch = fileName.match(/^(\d{4})-(\d{2})-(\d{2})/)
+      if (!dateMatch) continue
+      const yearMonth = `${dateMatch[1]}-${dateMatch[2]}`
+      if (frozenPrefixes.has(yearMonth)) continue // skip current + previous month
 
-      const filesMeta = await Promise.all(filesResult.items.map(async (item) => {
-        const fullMatch = item.name.match(/^(\d{4})-(\d{2})-(\d{2})/)
-        if (!fullMatch) return null
-        const yearMonth = `${fullMatch[1]}-${fullMatch[2]}`
-        if (frozenPrefixes.has(yearMonth)) return null
+      const year = dateMatch[1]
+      const date = `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`
+      const source = fileName.includes('InImage') ? 'in' : fileName.includes('outImage') ? 'out' : 'other'
 
-        hitCount++
-        updateProgress({ hits: hitCount, lastFile: item.name, filesFound: scanData.totalFiles })
-        try {
-          const meta = await getMetadata(item)
-          const source = item.name.includes('InImage') ? 'in' : item.name.includes('outImage') ? 'out' : 'other'
-          return {
-            fullPath: meta.fullPath,
-            size: meta.size,
-            source,
-            date: `${fullMatch[1]}-${fullMatch[2]}-${fullMatch[3]}`,
-          }
-        } catch {
-          return null
-        }
-      }))
-
-      const validFiles = filesMeta.filter(Boolean)
-
-      for (const file of validFiles) {
-        if (!empData.dates[file.date]) empData.dates[file.date] = []
-        empData.dates[file.date].push(file)
-        empData.totalFiles++
-        empData.totalSize += file.size || 0
-      }
-
-      if (empData.totalFiles > 0) {
-        monthData.employees[empId] = empData
-        monthData.totalFiles += empData.totalFiles
-        monthData.totalSize += empData.totalSize
-        scanData.totalFiles += empData.totalFiles
-        scanData.totalSize += empData.totalSize
-        updateProgress({ filesFound: scanData.totalFiles, totalSize: scanData.totalSize })
-      }
+      if (!scanData.employees[empId]) scanData.employees[empId] = { totalFiles: 0, years: {} }
+      if (!scanData.employees[empId].years[year]) scanData.employees[empId].years[year] = {}
+      if (!scanData.employees[empId].years[year][month]) scanData.employees[empId].years[year][month] = {}
+      if (!scanData.employees[empId].years[year][month][date]) scanData.employees[empId].years[year][month][date] = []
+      scanData.employees[empId].years[year][month][date].push({ fullPath: file.fullPath, source })
+      scanData.employees[empId].totalFiles++
     }
 
-    // Always save month — even with 0 files (shows as "Cleaned")
-    scanData.months[month] = monthData
+    // Track this month as scanned
+    if (!scanData.scannedMonths.includes(month)) {
+      scanData.scannedMonths.push(month)
+    }
   }
 
-  scanData.totalFiles = Object.values(scanData.months).reduce((s, m) => s + m.totalFiles, 0)
-  scanData.totalSize = Object.values(scanData.months).reduce((s, m) => s + (m.totalSize || 0), 0)
+  scanData.totalFiles = Object.values(scanData.employees).reduce((s, e) => s + e.totalFiles, 0)
   await saveAttendanceScanResult(cityPath, scanData)
   return scanData
 }

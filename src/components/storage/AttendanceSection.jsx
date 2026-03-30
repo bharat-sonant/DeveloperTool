@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, X, Clock, Settings2, Check, MapPin, ClipboardList } from 'lucide-react'
 import { deleteStorageFiles, listAttendanceMonths, scanAttendanceCleanup, saveAttendanceScanResult, loadAttendanceScanResult, resolveCommonCities, loadAttendanceCities, saveAttendanceCities } from '../../lib/firebase'
-import { MONTH_ORDER, formatSize } from './utils'
+import { MONTH_ORDER } from './utils'
 
 export default function AttendanceSection() {
   // City selection
@@ -16,8 +16,8 @@ export default function AttendanceSection() {
   const [loadingScanResult, setLoadingScanResult] = useState(false)
   const initialLoadDone = useRef(false)
 
-  const [selectedMonth, setSelectedMonth] = useState(null)
   const [selectedEmployee, setSelectedEmployee] = useState(null)
+  const [selectedYearMonth, setSelectedYearMonth] = useState(null) // "2025/April"
 
   const [allDateFiles, setAllDateFiles] = useState({})
   const [selectedFiles, setSelectedFiles] = useState(new Set())
@@ -49,8 +49,8 @@ export default function AttendanceSection() {
           const cached = await loadAttendanceScanResult(firstCity)
           if (cached) {
             setScanResult(cached)
-            const firstMonth = Object.entries(cached.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-            if (firstMonth) setSelectedMonth(firstMonth)
+            const firstEmp = Object.entries(cached.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+            if (firstEmp) setSelectedEmployee(firstEmp)
           }
         }
       }
@@ -113,22 +113,33 @@ export default function AttendanceSection() {
   }, [drawerSelectedCity])
 
   // Main page derived data
-  const monthList = scanResult
-    ? Object.entries(scanResult.months).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))
+  const MONTH_NUM = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
+
+  const employeeList = scanResult
+    ? Object.entries(scanResult.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([id, data]) => ({ id, totalFiles: data.totalFiles })).sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
     : []
 
-  const employeeList = (scanResult && selectedMonth && scanResult.months[selectedMonth]?.employees)
-    ? Object.entries(scanResult.months[selectedMonth].employees)
-        .filter(([, e]) => (e.totalFiles || 0) > 0)
-        .map(([id, data]) => ({ id, totalFiles: data.totalFiles }))
-        .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }))
-    : []
+  // Year/month pills for selected employee
+  const yearMonthList = (() => {
+    if (!scanResult || !selectedEmployee || !scanResult.employees[selectedEmployee]?.years) return []
+    const list = []
+    for (const [year, months] of Object.entries(scanResult.employees[selectedEmployee].years)) {
+      for (const [month, dates] of Object.entries(months)) {
+        const fileCount = Object.values(dates).flat().length
+        list.push({ year, month, fileCount, key: `${year}/${month}` })
+      }
+    }
+    return list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_NUM[b.month] || 0) - (MONTH_NUM[a.month] || 0))
+  })()
 
-  const dateList = (scanResult && selectedMonth && selectedEmployee &&
-    scanResult.months[selectedMonth]?.employees[selectedEmployee]?.dates)
-    ? Object.entries(scanResult.months[selectedMonth].employees[selectedEmployee].dates)
-        .sort(([a], [b]) => a.localeCompare(b))
-    : []
+  // Date list for selected year/month
+  const dateList = (() => {
+    if (!scanResult || !selectedEmployee || !selectedYearMonth) return []
+    const [year, month] = selectedYearMonth.split('/')
+    const dates = scanResult.employees[selectedEmployee]?.years?.[year]?.[month]
+    if (!dates) return []
+    return Object.entries(dates).sort(([a], [b]) => a.localeCompare(b))
+  })()
 
   const allFiles = Object.values(allDateFiles).flat()
 
@@ -152,14 +163,12 @@ export default function AttendanceSection() {
       })
       if (city === selectedCity) {
         setScanResult(result)
-        const firstMonth = Object.entries(result.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-        if (firstMonth && !selectedMonth) setSelectedMonth(firstMonth)
+        if (!selectedEmployee) {
+          const firstEmp = Object.entries(result.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          if (firstEmp) setSelectedEmployee(firstEmp)
+        }
       }
-      setDrawerScanData(prev => {
-        const next = prev ? JSON.parse(JSON.stringify(prev)) : { months: {} }
-        next.months[month] = result?.months?.[month] || { totalFiles: 0, totalSize: 0, employees: {} }
-        return next
-      })
+      setDrawerScanData(result)
     } catch {
       alert('Scan failed. Please try again.')
     }
@@ -177,7 +186,8 @@ export default function AttendanceSection() {
 
     for (const month of drawerMonths) {
       if (stopScanAllRef.current) break
-      if (drawerScanData?.months?.[month]) continue
+      // Check if this month has any scanned data in employees
+      if (drawerScanData?.scannedMonths?.includes(month)) continue
 
       setScanningMonth(month)
       setMonthScanProgress(null)
@@ -190,14 +200,12 @@ export default function AttendanceSection() {
         })
         if (city === selectedCity) {
           setScanResult(result)
-          const firstM = Object.entries(result.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-          if (firstM && !selectedMonth) setSelectedMonth(firstM)
+          if (!selectedEmployee) {
+            const firstEmp = Object.entries(result.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+            if (firstEmp) setSelectedEmployee(firstEmp)
+          }
         }
-        setDrawerScanData(prev => {
-          const next = prev ? JSON.parse(JSON.stringify(prev)) : { months: {} }
-          next.months[month] = result?.months?.[month] || { totalFiles: 0, totalSize: 0, employees: {} }
-          return next
-        })
+        setDrawerScanData(result)
       } catch {
         // skip failed month
       }
@@ -233,43 +241,44 @@ export default function AttendanceSection() {
       })
       setSelectedFiles(new Set(failed))
 
-      if (scanResult && selectedMonth && selectedEmployee && deleted > 0) {
+      if (scanResult && selectedEmployee && selectedYearMonth && deleted > 0) {
         const next = JSON.parse(JSON.stringify(scanResult))
-        const empData = next.months[selectedMonth]?.employees[selectedEmployee]
-        if (empData) {
+        const [year, month] = selectedYearMonth.split('/')
+        const dates = next.employees[selectedEmployee]?.years?.[year]?.[month]
+        if (dates) {
           const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
-          for (const [date, files] of Object.entries(empData.dates || {})) {
-            empData.dates[date] = files.filter(f => !deletedPaths.has(f.fullPath))
-            if (!empData.dates[date].length) delete empData.dates[date]
+          for (const [date, files] of Object.entries(dates)) {
+            dates[date] = files.filter(f => !deletedPaths.has(f.fullPath))
+            if (!dates[date].length) delete dates[date]
           }
-          const empFiles = Object.values(empData.dates || {}).flat()
-          empData.totalFiles = empFiles.length
-          empData.totalSize = empFiles.reduce((s, f) => s + (f.size || 0), 0)
-
-          const monthData = next.months[selectedMonth]
-          if (monthData) {
-            monthData.totalFiles = Object.values(monthData.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
-            monthData.totalSize = Object.values(monthData.employees || {}).reduce((s, e) => s + (e.totalSize || 0), 0)
-          }
-          next.totalFiles = Object.values(next.months || {}).reduce((s, m) => s + m.totalFiles, 0)
-          next.totalSize = Object.values(next.months || {}).reduce((s, m) => s + (m.totalSize || 0), 0)
+          // If month empty, remove it
+          if (Object.keys(dates).length === 0) delete next.employees[selectedEmployee].years[year][month]
+          // If year empty, remove it
+          if (Object.keys(next.employees[selectedEmployee].years[year] || {}).length === 0) delete next.employees[selectedEmployee].years[year]
+          // Recalculate totalFiles
+          next.employees[selectedEmployee].totalFiles = Object.values(next.employees[selectedEmployee].years || {}).reduce((s, months) =>
+            s + Object.values(months).reduce((s2, dates) => s2 + Object.values(dates).flat().length, 0), 0)
+          next.totalFiles = Object.values(next.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
         }
         setScanResult(next)
         if (selectedCity === drawerSelectedCity) setDrawerScanData(next)
         saveAttendanceScanResult(selectedCity, next).catch(() => {})
 
-        // Auto-select next employee/month
-        const empStillHasData = next.months[selectedMonth]?.employees[selectedEmployee]?.totalFiles > 0
-        if (!empStillHasData) {
-          const nextEmp = Object.entries(next.months[selectedMonth]?.employees || {}).filter(([, e]) => (e.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
-          if (nextEmp) {
-            setSelectedEmployee(nextEmp)
-          } else {
-            // Month empty — next month
-            const nextMonth = Object.entries(next.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-            setSelectedMonth(nextMonth || null)
-            setSelectedEmployee(null)
-          }
+        // Auto-advance if year/month emptied
+        if (!next.employees[selectedEmployee]?.years?.[year]?.[month]) {
+          const remaining = yearMonthList.filter(ym => ym.key !== selectedYearMonth)
+          setSelectedYearMonth(remaining[0]?.key || null)
+          setAllDateFiles({})
+        }
+        // Auto-advance if employee fully empty
+        if (next.employees[selectedEmployee]?.totalFiles <= 0) {
+          delete next.employees[selectedEmployee]
+          next.totalFiles = Object.values(next.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
+          setScanResult(next) // re-set with deleted employee
+          saveAttendanceScanResult(selectedCity, next).catch(() => {})
+          const nextEmp = Object.entries(next.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          setSelectedEmployee(nextEmp || null)
+          setSelectedYearMonth(null)
           setAllDateFiles({})
         }
       }
@@ -291,50 +300,81 @@ export default function AttendanceSection() {
     return `${Math.floor(hrs / 24)}d ago`
   }
 
+  // Load scan result on city change
   useEffect(() => {
     if (!selectedCity) { setLoadingScanResult(false); return }
     if (!initialLoadDone.current) return
     setLoadingScanResult(true)
     setScanResult(null)
-    setSelectedMonth(null)
     setSelectedEmployee(null)
+    setSelectedYearMonth(null)
     setAllDateFiles({})
     loadAttendanceScanResult(selectedCity).then(cached => {
       if (cached) {
         setScanResult(cached)
-        const firstMonth = Object.entries(cached.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).map(([k]) => k).sort((a, b) => MONTH_ORDER.indexOf(a) - MONTH_ORDER.indexOf(b))[0]
-        if (firstMonth) setSelectedMonth(firstMonth)
+        const firstEmp = Object.entries(cached.employees || {}).filter(([, e]) => e.totalFiles > 0).map(([k]) => k).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+        if (firstEmp) setSelectedEmployee(firstEmp)
       }
     }).finally(() => setLoadingScanResult(false))
   }, [selectedCity])
 
+  // Auto-select first year/month when employee changes
   useEffect(() => {
-    if (employeeList.length > 0 && !employeeList.find(e => e.id === selectedEmployee)) {
-      setSelectedEmployee(employeeList[0].id)
+    if (yearMonthList.length > 0 && !selectedYearMonth) {
+      setSelectedYearMonth(yearMonthList[0].key)
     }
-  }, [selectedMonth, employeeList.length])
+  }, [selectedEmployee, yearMonthList.length])
 
+  // Build allDateFiles when year/month changes
   useEffect(() => {
-    if (!selectedCity || !selectedMonth || !selectedEmployee || !scanResult) {
+    if (!selectedCity || !selectedEmployee || !selectedYearMonth || !scanResult) {
       setAllDateFiles({})
       return
     }
     setSelectedFiles(new Set())
-    const empData = scanResult.months[selectedMonth]?.employees[selectedEmployee]
-    if (!empData?.dates) { setAllDateFiles({}); return }
+    const [year, month] = selectedYearMonth.split('/')
+    const dates = scanResult.employees[selectedEmployee]?.years?.[year]?.[month]
+    if (!dates) { setAllDateFiles({}); return }
     const map = {}
-    for (const [date, files] of Object.entries(empData.dates)) {
+    for (const [date, files] of Object.entries(dates)) {
       map[date] = Array.isArray(files) ? files : []
     }
     setAllDateFiles(map)
-  }, [selectedCity, selectedMonth, selectedEmployee, scanResult])
+  }, [selectedCity, selectedEmployee, selectedYearMonth, scanResult])
+
+  // Helper: check which months have been scanned (exist in any employee's years)
+  const getScannedMonthsFromData = (data) => {
+    if (!data?.employees) return new Set()
+    const scanned = new Set()
+    for (const emp of Object.values(data.employees)) {
+      for (const months of Object.values(emp.years || {})) {
+        for (const month of Object.keys(months)) {
+          scanned.add(month)
+        }
+      }
+    }
+    // Also track months that were scanned but had no data (scannedMonths field)
+    if (data.scannedMonths) data.scannedMonths.forEach(m => scanned.add(m))
+    return scanned
+  }
 
   // ── Drawer ──
   const renderCityDrawer = () => {
     const drawerCityIsOnMainPage = drawerSelectedCity ? mainPageCities.includes(drawerSelectedCity) : false
-    const scannedCount = drawerScanData?.months ? Object.keys(drawerScanData.months).length : 0
-    const cleanedCount = drawerScanData?.months ? Object.values(drawerScanData.months).filter(m => (m.totalFiles || 0) === 0).length : 0
-    const hasDataCount = scannedCount - cleanedCount
+    const scannedMonthSet = getScannedMonthsFromData(drawerScanData)
+    const scannedCount = scannedMonthSet.size
+    const hasDataMonths = new Set()
+    if (drawerScanData?.employees) {
+      for (const emp of Object.values(drawerScanData.employees)) {
+        for (const months of Object.values(emp.years || {})) {
+          for (const month of Object.keys(months)) {
+            hasDataMonths.add(month)
+          }
+        }
+      }
+    }
+    const hasDataCount = hasDataMonths.size
+    const cleanedCount = scannedCount - hasDataCount
 
     return (
     <>
@@ -434,11 +474,11 @@ export default function AttendanceSection() {
                     <div className="flex items-center gap-2">
                       <span className="text-[10px] font-bold text-slate-500">Months</span>
                       <span className="text-[9px] px-1.5 py-0.5 rounded bg-slate-200/60 text-slate-500 font-semibold">{drawerMonths.length}</span>
-                      {drawerScanData?.months && scannedCount > 0 && !scanAllRunning && (
+                      {scannedCount > 0 && !scanAllRunning && (
                         <button onClick={() => {
                           if (!window.confirm(`Reset scan data for ${drawerSelectedCity}?`)) return
                           setDrawerScanData(null)
-                          saveAttendanceScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, totalSize: 0, months: {} })
+                          saveAttendanceScanResult(drawerSelectedCity, { city: drawerSelectedCity, scannedAt: new Date().toISOString(), totalFiles: 0, employees: {}, scannedMonths: [] })
                           if (drawerSelectedCity === selectedCity) setScanResult(null)
                         }} className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[8px] font-semibold text-red-400 hover:bg-red-50 border border-red-200/60 transition-all cursor-pointer">
                           <RefreshCw size={8} /> Reset All
@@ -469,10 +509,9 @@ export default function AttendanceSection() {
                     ) : (
                       <div className="grid grid-cols-4 gap-2 p-3">
                         {drawerMonths.map((month) => {
-                          const monthData = drawerScanData?.months?.[month]
-                          const isScanned = !!monthData
-                          const isCleaned = isScanned && (monthData.totalFiles || 0) === 0
-                          const hasData = isScanned && (monthData.totalFiles || 0) > 0
+                          const isScanned = scannedMonthSet.has(month)
+                          const hasData = hasDataMonths.has(month)
+                          const isCleaned = isScanned && !hasData
                           const isThisScanning = scanningMonth === month
                           return (
                             <div key={month} className={`relative rounded-xl border p-3 transition-all ${
@@ -485,18 +524,23 @@ export default function AttendanceSection() {
                                   <button disabled={!!resettingMonth} onClick={async () => {
                                     setResettingMonth(month)
                                     const result = await loadAttendanceScanResult(drawerSelectedCity)
-                                    if (result?.months?.[month]) {
-                                      delete result.months[month]
-                                      result.totalFiles = Object.values(result.months).reduce((s, m) => s + m.totalFiles, 0)
+                                    if (result) {
+                                      // Remove this month's data from all employees
+                                      for (const emp of Object.values(result.employees || {})) {
+                                        for (const [year, months] of Object.entries(emp.years || {})) {
+                                          if (months[month]) delete months[month]
+                                          if (Object.keys(months).length === 0) delete emp.years[year]
+                                        }
+                                        emp.totalFiles = Object.values(emp.years || {}).reduce((s, months) =>
+                                          s + Object.values(months).reduce((s2, dates) => s2 + Object.values(dates).flat().length, 0), 0)
+                                      }
+                                      // Remove from scannedMonths
+                                      result.scannedMonths = (result.scannedMonths || []).filter(m => m !== month)
+                                      result.totalFiles = Object.values(result.employees || {}).reduce((s, e) => s + e.totalFiles, 0)
                                       await saveAttendanceScanResult(drawerSelectedCity, result)
                                       if (drawerSelectedCity === selectedCity) setScanResult(result)
+                                      setDrawerScanData(result)
                                     }
-                                    setDrawerScanData(prev => {
-                                      if (!prev) return prev
-                                      const next = JSON.parse(JSON.stringify(prev))
-                                      delete next.months[month]
-                                      return next
-                                    })
                                     setResettingMonth(null)
                                   }} className="absolute top-1.5 right-1.5 text-[7px] font-semibold text-slate-300 hover:text-red-500 transition-colors cursor-pointer disabled:opacity-30">✕</button>
                                 )
@@ -511,11 +555,10 @@ export default function AttendanceSection() {
                               {isThisScanning ? (
                                 <div className="flex items-center gap-2 text-[8px] flex-wrap">
                                   <span className="font-semibold text-amber-600">{formatElapsed(monthScanElapsed)}</span>
-                                  {monthScanProgress?.filesFound > 0 && <span className="font-bold text-emerald-600">{monthScanProgress.filesFound} · {formatSize(monthScanProgress.totalSize || 0)}</span>}
-                                  {monthScanProgress?.hits > 0 && <span className="text-sky-500">{monthScanProgress.hits} hits</span>}
+                                  {monthScanProgress?.filesFound > 0 && <span className="font-bold text-emerald-600">{monthScanProgress.filesFound} found</span>}
                                 </div>
                               ) : hasData ? (
-                                <div className="text-[9px] font-semibold text-amber-600">{monthData.totalFiles} files · {formatSize(monthData.totalSize || 0)}</div>
+                                <div className="text-[9px] font-semibold text-amber-600">Has data</div>
                               ) : isCleaned ? (
                                 <div className="text-[9px] font-semibold text-emerald-500">Cleaned ✓</div>
                               ) : (
@@ -568,8 +611,8 @@ export default function AttendanceSection() {
   }
 
   const noCity = mainPageCities.length === 0
-  const hasData = !noCity && !!scanResult
-  const noData = !noCity && !scanResult
+  const hasData = !noCity && !!scanResult && employeeList.length > 0
+  const noData = !noCity && !hasData
 
   return (
     <>
@@ -585,12 +628,10 @@ export default function AttendanceSection() {
             <ClipboardList size={13} className="text-white" />
           </div>
           <h3 className="text-[13px] font-bold text-slate-800">Attendance</h3>
-          {hasData && (
+          {hasData && scanResult.totalFiles > 0 && (
             <div className="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200/60">
               <span className="text-[10px] font-bold text-amber-600">{scanResult.totalFiles}</span>
               <span className="text-[9px] text-amber-400">files</span>
-              <span className="text-[9px] text-amber-300">·</span>
-              <span className="text-[10px] font-semibold text-amber-500">{formatSize(scanResult.totalSize || 0)}</span>
             </div>
           )}
         </div>
@@ -637,53 +678,54 @@ export default function AttendanceSection() {
         </div>
       ) : (
       <div className="flex flex-1 min-h-0">
-        {/* Month + Employee sidebar */}
-        <div className="w-[100px] shrink-0 border-r border-slate-100 bg-slate-50/50 flex flex-col">
+        {/* Employee sidebar */}
+        <div className="w-[120px] shrink-0 border-r border-slate-100 bg-slate-50/50 flex flex-col">
           <div className="px-3 py-2 border-b border-slate-100">
-            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Months</span>
+            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Employees</span>
           </div>
-          <div className="overflow-y-auto border-b border-slate-100">
-            {monthList.map(month => (
-              <button key={month} onClick={() => { setSelectedMonth(month); setSelectedEmployee(null); setAllDateFiles({}) }}
-                className={`w-full px-3 py-2 text-left transition-all cursor-pointer border-l-2 ${
-                  selectedMonth === month ? 'bg-white border-l-amber-500 text-amber-700' : 'border-l-transparent text-slate-500 hover:bg-white/80'
-                }`}>
-                <span className={`text-[10px] block ${selectedMonth === month ? 'font-bold' : 'font-medium'}`}>{month}</span>
-              </button>
-            ))}
-          </div>
-          {selectedMonth && (
-            <>
-              <div className="px-3 py-2 border-b border-slate-100">
-                <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Employees</span>
-              </div>
-              <div className="flex-1 overflow-y-auto">
-                {employeeList.map(emp => (
-                  <button key={emp.id} onClick={() => { setSelectedEmployee(emp.id); setAllDateFiles({}) }}
-                    className={`w-full px-3 py-1.5 text-left transition-all cursor-pointer border-l-2 ${
-                      selectedEmployee === emp.id ? 'bg-white border-l-amber-500 text-amber-700' : 'border-l-transparent text-slate-500 hover:bg-white/80'
+          <div className="flex-1 overflow-y-auto">
+            {employeeList.length === 0 ? (
+              <div className="flex items-center justify-center h-full text-slate-400 text-[10px]">No employees</div>
+            ) : (
+              employeeList.map((emp, i) => {
+                const isSelected = selectedEmployee === emp.id
+                return (
+                  <button key={emp.id} onClick={() => { setSelectedEmployee(emp.id); setSelectedYearMonth(null); setAllDateFiles({}) }}
+                    className={`w-full px-3 py-2 text-left transition-all cursor-pointer border-l-2 ${
+                      isSelected ? 'bg-white border-l-amber-500 text-amber-700' : `border-l-transparent text-slate-500 hover:bg-white/80 hover:text-slate-700 ${i % 2 === 0 ? 'bg-amber-50/40' : ''}`
                     }`}>
-                    <span className={`text-[10px] block truncate ${selectedEmployee === emp.id ? 'font-bold' : 'font-medium'}`}>{emp.id}</span>
+                    <span className={`text-[10px] block truncate ${isSelected ? 'font-bold' : 'font-medium'}`}>{emp.id}</span>
                   </button>
-                ))}
-              </div>
-            </>
-          )}
+                )
+              })
+            )}
+          </div>
         </div>
 
         {/* Main content */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {!selectedMonth ? (
-            <div className="flex items-center justify-center h-full"><span className="text-[11px] text-slate-400">← Select a month</span></div>
-          ) : !selectedEmployee ? (
+          {!selectedEmployee ? (
             <div className="flex items-center justify-center h-full"><span className="text-[11px] text-slate-400">← Select an employee</span></div>
           ) : (
             <>
+              {/* Year/Month pills + actions */}
               <div className="px-4 py-2.5 border-b border-slate-100 bg-white">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-[11px] font-bold text-slate-700">Employee {selectedEmployee}</span>
-                  {Object.keys(allDateFiles).length > 0 && (
-                    <span className="text-[9px] text-slate-400 font-medium">· {allFiles.length} files · {formatSize(allFiles.reduce((s, f) => s + (f.size || 0), 0))}</span>
+                  {yearMonthList.map(ym => {
+                    const isActive = selectedYearMonth === ym.key
+                    return (
+                      <button key={ym.key} onClick={() => { setSelectedYearMonth(ym.key); setAllDateFiles({}) }}
+                        className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                          isActive
+                            ? 'bg-amber-500 text-white shadow-sm'
+                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-amber-50 hover:text-amber-600'
+                        }`}>
+                        {ym.month} {ym.year}
+                      </button>
+                    )
+                  })}
+                  {selectedEmployee && scanResult?.employees?.[selectedEmployee]?.totalFiles > 0 && (
+                    <span className="text-[9px] font-bold px-2 py-0.5 rounded-full bg-amber-500 text-white">{scanResult.employees[selectedEmployee].totalFiles} files</span>
                   )}
                   <div className="flex items-center gap-1.5 ml-auto">
                     {selectedFiles.size > 0 && (
@@ -705,8 +747,11 @@ export default function AttendanceSection() {
                 </div>
               </div>
 
+              {/* Date cards */}
               <div className="flex-1 overflow-y-auto p-4 bg-slate-50/30">
-                {dateList.length === 0 ? (
+                {!selectedYearMonth ? (
+                  <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">← Select a month above</div>
+                ) : dateList.length === 0 ? (
                   <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No dates found</div>
                 ) : (
                   <div className="grid grid-cols-5 gap-2.5">
@@ -721,11 +766,8 @@ export default function AttendanceSection() {
                               <span className="text-[10px] font-bold text-slate-700">{date}</span>
                             </div>
                             {files.length > 0 && (
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-[8px] text-slate-400 font-medium">{formatSize(files.reduce((s, f) => s + (f.size || 0), 0))}</span>
-                                <input type="checkbox" className="w-3.5 h-3.5 rounded accent-amber-500 cursor-pointer" checked={allChecked}
-                                  onChange={(e) => { setSelectedFiles(prev => { const next = new Set(prev); files.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) }); return next }) }} />
-                              </div>
+                              <input type="checkbox" className="w-3.5 h-3.5 rounded accent-amber-500 cursor-pointer" checked={allChecked}
+                                onChange={(e) => { setSelectedFiles(prev => { const next = new Set(prev); files.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) }); return next }) }} />
                             )}
                           </div>
                           <div className="px-2 py-2">
