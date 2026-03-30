@@ -18,11 +18,11 @@ import DutyOnOffSection from '../components/storage/DutyOnOffSection'
 import GenericSection from '../components/storage/GenericSection'
 
 const MENU_ITEMS = [
-  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement' },
+  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement', disabled: true },
   { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '' },
   { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData' },
   { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages' },
-  { key: 'wardTrips', label: 'Ward Trips', icon: Route,         path: 'WardTrips' },
+  { key: 'wardTrips', label: 'Ward Trips', icon: Route,         path: 'WardTrips', disabled: true },
   { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData', disabled: true },
   { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData', disabled: true },
 ]
