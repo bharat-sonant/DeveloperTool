@@ -19,7 +19,6 @@ export default function LogBookSection() {
         const firstCity = config.mainPage[0] || config.included[0]
         if (firstCity) {
           setSelectedCity(firstCity)
-          // Load scan result in same flow — no flicker
           const cached = await loadLogBookScanResult(firstCity)
           if (cached) {
             setScanResult(cached)
@@ -30,10 +29,6 @@ export default function LogBookSection() {
       }
       initialLoadDone.current = true
       setLoadingCities(false)
-    })
-    // Load master city list in background (only needed for drawer)
-    resolveCommonCities().then(master => {
-      if (master && master.length > 0) setAllCities(master)
     })
   }, [])
 
@@ -90,6 +85,7 @@ export default function LogBookSection() {
 
   const [showCityDrawer, setShowCityDrawer] = useState(false)
   const [showAvailableCities, setShowAvailableCities] = useState(false)
+  const masterCitiesLoaded = useRef(false)
   const [drawerSelectedCity, setDrawerSelectedCity] = useState(null) // city selected in drawer list
   const [drawerWards, setDrawerWards] = useState([])
   const [drawerScanData, setDrawerScanData] = useState(null) // full scan result for drawer city
@@ -102,6 +98,14 @@ export default function LogBookSection() {
   const [scanAllStopping, setScanAllStopping] = useState(false)
   const [resettingWard, setResettingWard] = useState(null)
   const stopScanAllRef = useRef(false)
+
+  useEffect(() => {
+    if (!showCityDrawer || masterCitiesLoaded.current) return
+    masterCitiesLoaded.current = true
+    resolveCommonCities().then(master => {
+      if (master && master.length > 0) setAllCities(master)
+    })
+  }, [showCityDrawer])
 
   useEffect(() => {
     if (!drawerSelectedCity) { setDrawerWards([]); setDrawerScanData(null); return }

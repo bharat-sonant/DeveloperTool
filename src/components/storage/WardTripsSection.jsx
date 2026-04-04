@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Loader2, FileImage, Search, RefreshCw, Calendar, Trash2, X, Clock, Settings2, Check, MapPin, Route } from 'lucide-react'
+import { Loader2, Search, RefreshCw, Calendar, Trash2, X, Settings2, Check, MapPin, Route } from 'lucide-react'
 import { deleteStorageFiles, listWardTripsYearMonths, scanWardTripsMonth, resetWardTripsMonth, saveWardTripsScanResult, loadWardTripsScanResult, resolveCommonCities, loadWardTripsCities, saveWardTripsCities } from '../../lib/firebase'
 
 export default function WardTripsSection() {
@@ -11,32 +11,67 @@ export default function WardTripsSection() {
   const [loadingCities, setLoadingCities] = useState(true)
   const [savingCities, setSavingCities] = useState(false)
 
+  const [scanResult, setScanResult] = useState(null)
+  const [loadingScanResult, setLoadingScanResult] = useState(false)
+  const initialLoadDone = useRef(false)
+
+  const [selectedWard, setSelectedWard] = useState(null)
+  const [selectedYearMonth, setSelectedYearMonth] = useState(null)
+  const [selectedFiles, setSelectedFiles] = useState(new Set())
+  const [deleting, setDeleting] = useState(false)
+
+  const [showCityDrawer, setShowCityDrawer] = useState(false)
+  const [showAvailableCities, setShowAvailableCities] = useState(false)
+  const masterCitiesLoaded = useRef(false)
+  const [drawerSelectedCity, setDrawerSelectedCity] = useState(null)
+  const [drawerYearMonths, setDrawerYearMonths] = useState([])
+  const [drawerScanData, setDrawerScanData] = useState(null)
+  const [loadingDrawerYearMonths, setLoadingDrawerYearMonths] = useState(false)
+  const [scanningMonth, setScanningMonth] = useState(null)
+  const [monthScanProgress, setMonthScanProgress] = useState(null)
+  const [monthScanElapsed, setMonthScanElapsed] = useState(0)
+  const monthTimerRef = useRef(null)
+  const [scanAllRunning, setScanAllRunning] = useState(false)
+  const [scanAllStopping, setScanAllStopping] = useState(false)
+  const stopScanAllRef = useRef(false)
+
   useEffect(() => {
-    loadWardTripsCities().then(async (config) => {
+    const citiesPromise = loadWardTripsCities()
+    // Start both in parallel: cities config + scan result for first city
+    citiesPromise.then(config => {
       if (config.included.length > 0) {
         setIncludedCities(config.included)
         setMainPageCities(config.mainPage)
         const firstCity = config.mainPage[0] || config.included[0]
-        if (firstCity) {
-          setSelectedCity(firstCity)
-          const cached = await loadWardTripsScanResult(firstCity)
-          if (cached) {
-            setScanResult(cached)
-            // Auto-select first month with data
-            const firstMonth = Object.entries(cached.months || {})
-              .filter(([, m]) => (m.totalFiles || 0) > 0)
-              .sort(([a], [b]) => b.localeCompare(a))[0]
-            if (firstMonth) setSelectedYearMonth(firstMonth[0])
-          }
-        }
+        if (firstCity) setSelectedCity(firstCity)
       }
       initialLoadDone.current = true
       setLoadingCities(false)
     })
+    citiesPromise.then(config => {
+      const firstCity = config.mainPage?.[0] || config.included?.[0]
+      if (!firstCity) return
+      loadWardTripsScanResult(firstCity).then(cached => {
+        if (cached) {
+          setScanResult(cached)
+          const firstWard = Object.keys(cached.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          if (firstWard) {
+            setSelectedWard(firstWard)
+            setSelectedYearMonth(getFirstYearMonth(cached, firstWard))
+          }
+        }
+      })
+    })
+  }, [])
+
+  // Lazy load master cities when drawer opens
+  useEffect(() => {
+    if (!showCityDrawer || masterCitiesLoaded.current) return
+    masterCitiesLoaded.current = true
     resolveCommonCities().then(master => {
       if (master && master.length > 0) setAllCities(master)
     })
-  }, [])
+  }, [showCityDrawer])
 
   const saveCities = async (included, mainPage) => {
     setSavingCities(true)
@@ -66,7 +101,7 @@ export default function WardTripsSection() {
     setMainPageCities(updated)
     if (isOn && selectedCity === city) {
       setSelectedCity(updated[0] || null)
-      if (updated.length === 0) { setScanResult(null); setAllDateFiles({}) }
+      if (updated.length === 0) { setScanResult(null) }
     } else if (!isOn && !selectedCity) {
       setSelectedCity(city)
     }
@@ -74,35 +109,6 @@ export default function WardTripsSection() {
   }
 
   const availableCities = allCities.filter(c => !includedCities.includes(c))
-
-  // Scan result & navigation
-  const [scanResult, setScanResult] = useState(null)
-  const [loadingScanResult, setLoadingScanResult] = useState(false)
-  const initialLoadDone = useRef(false)
-
-  const [selectedYearMonth, setSelectedYearMonth] = useState(null) // "2025/August"
-  const [selectedDate, setSelectedDate] = useState(null)
-
-  const [allDateFiles, setAllDateFiles] = useState({})
-  const [selectedFiles, setSelectedFiles] = useState(new Set())
-  const [deleting, setDeleting] = useState(false)
-
-  // Drawer state
-  const [showCityDrawer, setShowCityDrawer] = useState(false)
-  const [showAvailableCities, setShowAvailableCities] = useState(false)
-  const [drawerSelectedCity, setDrawerSelectedCity] = useState(null)
-  const [drawerYearMonths, setDrawerYearMonths] = useState([])
-  const [drawerScanData, setDrawerScanData] = useState(null)
-  const [loadingDrawerYearMonths, setLoadingDrawerYearMonths] = useState(false)
-
-  // Scan state
-  const [scanningMonth, setScanningMonth] = useState(null) // "2025/August"
-  const [monthScanProgress, setMonthScanProgress] = useState(null)
-  const [monthScanElapsed, setMonthScanElapsed] = useState(0)
-  const monthTimerRef = useRef(null)
-  const [scanAllRunning, setScanAllRunning] = useState(false)
-  const [scanAllStopping, setScanAllStopping] = useState(false)
-  const stopScanAllRef = useRef(false)
 
   // Load drawer data when city changes
   useEffect(() => {
@@ -118,22 +124,44 @@ export default function WardTripsSection() {
       .finally(() => setLoadingDrawerYearMonths(false))
   }, [drawerSelectedCity])
 
-  // Derived: month list for sidebar (newest first)
   const MONTH_NUM = { January:1, February:2, March:3, April:4, May:5, June:6, July:7, August:8, September:9, October:10, November:11, December:12 }
-  const monthList = scanResult
-    ? Object.entries(scanResult.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).sort(([a], [b]) => {
-        const [yA, mA] = a.split('/'); const [yB, mB] = b.split('/')
-        return yB.localeCompare(yA) || (MONTH_NUM[mB] || 0) - (MONTH_NUM[mA] || 0)
-      })
+
+  const getFirstYearMonth = (data, ward) => {
+    if (!data?.wards?.[ward]?.years) return null
+    const list = []
+    for (const [year, months] of Object.entries(data.wards[ward].years)) {
+      for (const month of Object.keys(months)) {
+        list.push({ year, month, key: `${year}/${month}` })
+      }
+    }
+    list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_NUM[a.month] || 0) - (MONTH_NUM[b.month] || 0))
+    return list[0]?.key || null
+  }
+
+  // Derived: ward list from scan result
+  const wardList = scanResult
+    ? Object.keys(scanResult.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
     : []
 
-  // Derived: date list for selected month
-  const dateList = (scanResult && selectedYearMonth && scanResult.months?.[selectedYearMonth]?.dates)
-    ? Object.entries(scanResult.months[selectedYearMonth].dates).sort(([a], [b]) => a.localeCompare(b))
-    : []
+  // Derived: year/month list for selected ward
+  const yearMonthList = (() => {
+    if (!scanResult || !selectedWard || !scanResult.wards?.[selectedWard]?.years) return []
+    const list = []
+    for (const [year, months] of Object.entries(scanResult.wards[selectedWard].years)) {
+      for (const month of Object.keys(months)) {
+        list.push({ year, month, key: `${year}/${month}` })
+      }
+    }
+    return list.sort((a, b) => b.year.localeCompare(a.year) || (MONTH_NUM[a.month] || 0) - (MONTH_NUM[b.month] || 0))
+  })()
 
-  // Derived: all files flat
-  const allFiles = Object.values(allDateFiles).flat()
+  // Derived: date list for selected ward + year/month
+  const dateList = (() => {
+    if (!scanResult || !selectedWard || !selectedYearMonth) return []
+    const [year, month] = selectedYearMonth.split('/')
+    const datesObj = scanResult.wards?.[selectedWard]?.years?.[year]?.[month] || {}
+    return Object.entries(datesObj).sort(([a], [b]) => a.localeCompare(b))
+  })()
 
   function formatElapsed(seconds) {
     const h = Math.floor(seconds / 3600)
@@ -145,6 +173,7 @@ export default function WardTripsSection() {
   }
 
   function timeAgo(isoStr) {
+    if (!isoStr) return ''
     const diff = Date.now() - new Date(isoStr).getTime()
     const mins = Math.floor(diff / 60000)
     if (mins < 1) return 'just now'
@@ -152,11 +181,6 @@ export default function WardTripsSection() {
     const hrs = Math.floor(mins / 60)
     if (hrs < 24) return `${hrs}h ago`
     return `${Math.floor(hrs / 24)}d ago`
-  }
-
-  function formatMonthLabel(key) {
-    const [year, month] = key.split('/')
-    return `${month} ${year}`
   }
 
   // Scan a single month
@@ -172,9 +196,9 @@ export default function WardTripsSection() {
       })
       if (city === selectedCity) {
         setScanResult(result)
-        if (!selectedYearMonth) {
-          const first = Object.entries(result.months || {}).filter(([, m]) => m.totalFiles > 0).sort(([a], [b]) => b.localeCompare(a))[0]
-          if (first) setSelectedYearMonth(first[0])
+        if (!selectedWard) {
+          const firstWard = Object.keys(result.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          if (firstWard) setSelectedWard(firstWard)
         }
       }
       setDrawerScanData(result)
@@ -197,8 +221,7 @@ export default function WardTripsSection() {
     for (const { year, month } of drawerYearMonths) {
       if (stopScanAllRef.current) break
       const monthKey = `${year}/${month}`
-      if (drawerScanData?.months?.[monthKey]) continue // skip already scanned
-
+      if (drawerScanData?.scannedMonths?.includes(monthKey)) continue // skip already scanned
       await handleScanMonth(city, year, month)
     }
 
@@ -212,57 +235,65 @@ export default function WardTripsSection() {
     setScanAllStopping(true)
   }
 
-  // Delete
+  // All files for current view (selected ward + year/month)
+  const allFiles = dateList.flatMap(([, files]) => files)
+
+  // Delete selected files
   const handleDeleteSelected = async () => {
     if (selectedFiles.size === 0) return
     setDeleting(true)
     try {
       const { deleted, failed } = await deleteStorageFiles([...selectedFiles])
       const failedSet = new Set(failed)
-
-      // Update allDateFiles
-      setAllDateFiles(prev => {
-        const next = {}
-        for (const [date, files] of Object.entries(prev)) {
-          next[date] = files.filter(f => !selectedFiles.has(f.fullPath) || failedSet.has(f.fullPath))
-        }
-        return next
-      })
+      const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
       setSelectedFiles(new Set(failed))
 
-      // Update scan result
-      if (scanResult && selectedYearMonth && deleted > 0) {
+      if (scanResult && selectedWard && selectedYearMonth && deleted > 0) {
         const next = JSON.parse(JSON.stringify(scanResult))
-        const monthData = next.months?.[selectedYearMonth]
-        if (monthData) {
-          const deletedPaths = new Set([...selectedFiles].filter(p => !failedSet.has(p)))
-          for (const [date, dateData] of Object.entries(monthData.dates || {})) {
-            for (const [ward, wardData] of Object.entries(dateData.wards || {})) {
-              for (const [trip, files] of Object.entries(wardData.trips || {})) {
-                wardData.trips[trip] = files.filter(f => !deletedPaths.has(f.fullPath))
-                if (wardData.trips[trip].length === 0) delete wardData.trips[trip]
-              }
-              const tripFiles = Object.values(wardData.trips || {}).flat()
-              wardData.totalFiles = tripFiles.length
-              if (wardData.totalFiles === 0) delete dateData.wards[ward]
-            }
-            dateData.totalFiles = Object.values(dateData.wards || {}).reduce((s, w) => s + w.totalFiles, 0)
-            if (dateData.totalFiles === 0) delete monthData.dates[date]
+        const [year, month] = selectedYearMonth.split('/')
+        const dates = next.wards?.[selectedWard]?.years?.[year]?.[month]
+        if (dates) {
+          for (const [date, files] of Object.entries(dates)) {
+            dates[date] = files.filter(f => !deletedPaths.has(f))
+            if (dates[date].length === 0) delete dates[date]
           }
-          monthData.totalFiles = Object.values(monthData.dates || {}).reduce((s, d) => s + d.totalFiles, 0)
-          if (monthData.totalFiles === 0) delete next.months[selectedYearMonth]
+          // If month empty, remove it
+          if (Object.keys(dates).length === 0) delete next.wards[selectedWard].years[year][month]
+          // If year empty, remove it
+          if (Object.keys(next.wards[selectedWard].years[year] || {}).length === 0) delete next.wards[selectedWard].years[year]
+          // If ward has no years, remove it
+          if (Object.keys(next.wards[selectedWard].years || {}).length === 0) delete next.wards[selectedWard]
         }
-        next.totalFiles = Object.values(next.months || {}).reduce((s, m) => s + m.totalFiles, 0)
+
+        // Recalculate totalFiles
+        let rootTotal = 0
+        for (const [, wd] of Object.entries(next.wards || {})) {
+          let wardTotal = 0
+          for (const [, months] of Object.entries(wd.years || {})) {
+            for (const [, ds] of Object.entries(months)) {
+              for (const [, fs] of Object.entries(ds)) {
+                wardTotal += fs.length
+              }
+            }
+          }
+          wd.totalFiles = wardTotal
+          rootTotal += wardTotal
+        }
+        next.totalFiles = rootTotal
+
         setScanResult(next)
         if (selectedCity === drawerSelectedCity) setDrawerScanData(next)
         saveWardTripsScanResult(selectedCity, next).catch(() => {})
 
         // Auto-advance if month emptied
-        if (!next.months?.[selectedYearMonth]) {
-          const nextMonth = Object.entries(next.months || {}).filter(([, m]) => m.totalFiles > 0).sort(([a], [b]) => b.localeCompare(a))[0]
-          setSelectedYearMonth(nextMonth?.[0] || null)
-          setSelectedDate(null)
-          setAllDateFiles({})
+        if (!next.wards?.[selectedWard]?.years?.[year]?.[month]) {
+          setSelectedYearMonth(null)
+        }
+        // Auto-advance if ward emptied
+        if (!next.wards?.[selectedWard]) {
+          const nextWard = Object.keys(next.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+          setSelectedWard(nextWard || null)
+          setSelectedYearMonth(null)
         }
       }
 
@@ -279,47 +310,41 @@ export default function WardTripsSection() {
     if (!initialLoadDone.current) return
     setLoadingScanResult(true)
     setScanResult(null)
+    setSelectedWard(null)
     setSelectedYearMonth(null)
-    setSelectedDate(null)
-    setAllDateFiles({})
     loadWardTripsScanResult(selectedCity).then(cached => {
       if (cached) {
         setScanResult(cached)
-        const firstMonth = Object.entries(cached.months || {}).filter(([, m]) => (m.totalFiles || 0) > 0).sort(([a], [b]) => b.localeCompare(a))[0]
-        if (firstMonth) setSelectedYearMonth(firstMonth[0])
+        const firstWard = Object.keys(cached.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+        if (firstWard) {
+          setSelectedWard(firstWard)
+          setSelectedYearMonth(getFirstYearMonth(cached, firstWard))
+        }
       }
     }).finally(() => setLoadingScanResult(false))
   }, [selectedCity])
 
-  // Build allDateFiles when month/date changes
-  useEffect(() => {
-    if (!selectedCity || !selectedYearMonth || !scanResult) {
-      setAllDateFiles({})
-      return
-    }
-    setSelectedFiles(new Set())
-    const monthData = scanResult.months?.[selectedYearMonth]
-    if (!monthData?.dates) { setAllDateFiles({}); return }
-
-    // Flatten: for each date, collect all files across wards+trips
-    const map = {}
-    for (const [date, dateData] of Object.entries(monthData.dates)) {
-      const files = []
-      for (const [, wardData] of Object.entries(dateData.wards || {})) {
-        for (const [, tripFiles] of Object.entries(wardData.trips || {})) {
-          files.push(...tripFiles)
-        }
-      }
-      map[date] = files
-    }
-    setAllDateFiles(map)
-  }, [selectedCity, selectedYearMonth, scanResult])
-
   // ── Drawer Render ──
   const renderCityDrawer = () => {
     const drawerCityIsOnMainPage = drawerSelectedCity ? mainPageCities.includes(drawerSelectedCity) : false
-    const scannedMonths = drawerScanData?.months ? Object.keys(drawerScanData.months) : []
+    const scannedMonths = drawerScanData?.scannedMonths || []
     const scannedCount = scannedMonths.length
+
+    // Determine which scanned months have data
+    const hasDataMonthKeys = new Set()
+    if (drawerScanData?.wards) {
+      for (const wardData of Object.values(drawerScanData.wards)) {
+        for (const [y, months] of Object.entries(wardData.years || {})) {
+          for (const m of Object.keys(months)) {
+            hasDataMonthKeys.add(`${y}/${m}`)
+          }
+        }
+      }
+    }
+    const hasDataCount = [...scannedMonths].filter(m => hasDataMonthKeys.has(m)).length
+    const cleanedCount = scannedCount - hasDataCount
+    const pendingCount = drawerYearMonths.length - scannedCount
+    const totalDrawerFiles = drawerScanData?.totalFiles || 0
 
     return (
     <>
@@ -394,7 +419,7 @@ export default function WardTripsSection() {
                 </div>
               ) : (
                 <>
-                  {/* City header with actions */}
+                  {/* City header */}
                   <div className="px-5 py-3 border-b border-slate-100 bg-white">
                     <div className="flex items-center gap-2">
                       <h3 className="text-[14px] font-bold text-slate-800 flex-1">{drawerSelectedCity}</h3>
@@ -420,12 +445,21 @@ export default function WardTripsSection() {
                       )}
                     </div>
 
-                    {/* Summary */}
                     {drawerYearMonths.length > 0 && (
-                      <div className="mt-2 flex items-center gap-3 text-[10px] text-slate-400">
-                        <span>{drawerYearMonths.length} months</span>
-                        <span>·</span>
-                        <span>{scannedCount} scanned</span>
+                      <div className="mt-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <div className="flex-1 h-2 bg-slate-100 rounded-full overflow-hidden flex">
+                            {cleanedCount > 0 && <div className="h-full bg-emerald-400 transition-all" style={{ width: `${(cleanedCount / drawerYearMonths.length) * 100}%` }} />}
+                            {hasDataCount > 0 && <div className="h-full bg-amber-400 transition-all" style={{ width: `${(hasDataCount / drawerYearMonths.length) * 100}%` }} />}
+                          </div>
+                          <span className="text-[9px] text-slate-400 font-medium shrink-0">{scannedCount}/{drawerYearMonths.length}</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-emerald-400 shrink-0" /><span className="text-slate-500">{cleanedCount} Cleaned</span></div>
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-amber-400 shrink-0" /><span className="text-slate-500">{hasDataCount} Has Data</span></div>
+                          <div className="flex items-center gap-1.5 text-[9px]"><span className="w-2.5 h-2.5 rounded bg-slate-200 shrink-0" /><span className="text-slate-400">{pendingCount} Pending</span></div>
+                          {totalDrawerFiles > 0 && <span className="text-[9px] font-semibold text-amber-500 ml-auto">{totalDrawerFiles.toLocaleString()} files</span>}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -439,7 +473,7 @@ export default function WardTripsSection() {
                         <button
                           onClick={() => {
                             if (!window.confirm(`Reset all scan data for ${drawerSelectedCity}?`)) return
-                            const empty = { city: drawerSelectedCity, totalFiles: 0, months: {} }
+                            const empty = { city: drawerSelectedCity, scannedAt: new Date().toISOString(), scannedMonths: [], wards: {} }
                             setDrawerScanData(null)
                             saveWardTripsScanResult(drawerSelectedCity, empty)
                             if (drawerSelectedCity === selectedCity) setScanResult(null)
@@ -494,10 +528,9 @@ export default function WardTripsSection() {
                               <div className="grid grid-cols-4 gap-2">
                                 {months.map(({ month }) => {
                                   const monthKey = `${year}/${month}`
-                                  const monthScan = drawerScanData?.months?.[monthKey]
-                                  const isScanned = !!monthScan
-                                  const hasData = isScanned && (monthScan.totalFiles || 0) > 0
-                                  const isCleaned = isScanned && (monthScan.totalFiles || 0) === 0
+                                  const isScanned = scannedMonths.includes(monthKey)
+                                  const hasData = isScanned && hasDataMonthKeys.has(monthKey)
+                                  const isCleaned = isScanned && !hasData
                                   const isThisScanning = scanningMonth === monthKey
                                   const isBusy = !!scanningMonth
 
@@ -551,20 +584,16 @@ export default function WardTripsSection() {
                                       {isThisScanning ? (
                                         <div className="flex items-center gap-2 text-[8px] flex-wrap">
                                           <span className="font-semibold text-teal-600">{formatElapsed(monthScanElapsed)}</span>
-                                          {monthScanProgress?.apiCalls > 0 && (
-                                            <span className="text-sky-500">{monthScanProgress.apiCalls} calls</span>
+                                          {monthScanProgress?.filesFound > 0 && (
+                                            <span className="text-sky-500">{monthScanProgress.filesFound} files</span>
                                           )}
                                         </div>
                                       ) : hasData ? (
                                         <div className="text-[9px] font-semibold text-amber-600">Has data</div>
                                       ) : isCleaned ? (
-                                        <div className="text-[9px] font-semibold text-emerald-500">Clean ✓</div>
+                                        <div className="text-[9px] font-semibold text-emerald-500">Clean</div>
                                       ) : (
-                                        <div className="text-[9px] text-slate-400">Not scanned</div>
-                                      )}
-
-                                      {isScanned && monthScan.scannedAt && !isThisScanning && (
-                                        <div className="text-[8px] text-slate-300 mt-1">{timeAgo(monthScan.scannedAt)}</div>
+                                        <div className="text-[9px] text-slate-400">Pending</div>
                                       )}
                                     </div>
                                   )
@@ -624,7 +653,7 @@ export default function WardTripsSection() {
   }
 
   const noCity = mainPageCities.length === 0
-  const hasData = !noCity && !!scanResult && monthList.length > 0
+  const hasData = !noCity && !!scanResult && wardList.length > 0
   const noData = !noCity && !hasData
 
   return (
@@ -642,6 +671,9 @@ export default function WardTripsSection() {
             <Route size={13} className="text-white" />
           </div>
           <h3 className="text-[13px] font-bold text-slate-800">WardTrips</h3>
+          {scanResult?.totalFiles > 0 && (
+            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-teal-100 text-teal-600">{scanResult.totalFiles.toLocaleString()} files</span>
+          )}
         </div>
         <div className="flex-1 flex items-center gap-1.5 px-4 overflow-x-auto">
           {mainPageCities.map(city => (
@@ -657,6 +689,9 @@ export default function WardTripsSection() {
           ))}
         </div>
         <div className="flex items-center gap-2 shrink-0">
+          {scanResult?.scannedAt && (
+            <span className="text-[9px] text-slate-400">{timeAgo(scanResult.scannedAt)}</span>
+          )}
           <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-slate-50 text-slate-600 border border-slate-200 hover:bg-teal-50 hover:text-teal-600 hover:border-teal-200">
             <Settings2 size={12} /> City Setting
@@ -687,25 +722,29 @@ export default function WardTripsSection() {
         </div>
       ) : (
       <div className="flex flex-1 min-h-0">
-        {/* Month sidebar */}
+        {/* Ward sidebar */}
         <div className="w-[130px] shrink-0 border-r border-slate-100 bg-slate-50/50 flex flex-col">
           <div className="px-3 py-2 border-b border-slate-100">
-            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Months</span>
+            <span className="text-[9px] font-bold uppercase tracking-widest text-slate-400">Wards ({wardList.length})</span>
           </div>
           <div className="flex-1 overflow-y-auto">
-            {monthList.map(([key, data]) => {
-              const isSelected = selectedYearMonth === key
+            {wardList.map(ward => {
+              const isSelected = selectedWard === ward
+              const wardFiles = scanResult?.wards?.[ward]?.totalFiles || 0
               return (
                 <button
-                  key={key}
-                  onClick={() => { setSelectedYearMonth(key); setSelectedDate(null); setAllDateFiles({}) }}
-                  className={`w-full px-3 py-2.5 text-left transition-all cursor-pointer border-l-2 ${
+                  key={ward}
+                  onClick={() => { setSelectedWard(ward); setSelectedYearMonth(getFirstYearMonth(scanResult, ward)); setSelectedFiles(new Set()) }}
+                  className={`w-full px-3 py-2 text-left transition-all cursor-pointer border-l-2 ${
                     isSelected
                       ? 'bg-white border-l-teal-500 text-teal-700'
                       : 'border-l-transparent text-slate-500 hover:bg-white/80 hover:text-slate-700'
                   }`}
                 >
-                  <span className={`text-[11px] block ${isSelected ? 'font-bold' : 'font-medium'}`}>{formatMonthLabel(key)}</span>
+                  <div className="flex items-center justify-between gap-1">
+                    <span className={`text-[10px] truncate ${isSelected ? 'font-bold' : 'font-medium'}`}>{ward}</span>
+                    <span className={`text-[8px] font-bold px-1.5 py-0.5 rounded-full shrink-0 ${isSelected ? 'bg-teal-500 text-white' : 'bg-teal-100 text-teal-600'}`}>{wardFiles}</span>
+                  </div>
                 </button>
               )
             })}
@@ -714,121 +753,91 @@ export default function WardTripsSection() {
 
         {/* Main content */}
         <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-          {!selectedYearMonth ? (
+          {!selectedWard ? (
             <div className="flex flex-col items-center justify-center h-full gap-2">
-              <span className="text-[11px] text-slate-400">← Select a month to view data</span>
+              <span className="text-[11px] text-slate-400">Select a ward</span>
             </div>
           ) : (
             <>
-              {/* Date pills + actions */}
+              {/* Year/Month pills */}
               <div className="px-4 py-2.5 border-b border-slate-100 bg-white">
                 <div className="flex items-center gap-2 flex-wrap">
-                  {dateList.map(([date, dateData]) => {
-                    const isActive = selectedDate === date
+                  {yearMonthList.map(ym => {
+                    const isActive = selectedYearMonth === ym.key
                     return (
-                      <button key={date} onClick={() => setSelectedDate(selectedDate === date ? null : date)}
+                      <button key={ym.key} onClick={() => { setSelectedYearMonth(selectedYearMonth === ym.key ? null : ym.key); setSelectedFiles(new Set()) }}
                         className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
                           isActive
                             ? 'bg-teal-500 text-white shadow-sm'
                             : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-teal-50 hover:text-teal-600'
                         }`}>
-                        {date}
+                        {ym.month} {ym.year}
                       </button>
                     )
                   })}
-                  <div className="flex items-center gap-1.5 ml-auto">
-                    {selectedFiles.size > 0 && (
-                      <button onClick={handleDeleteSelected} disabled={deleting}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-red-500 text-white hover:bg-red-600 shadow-sm disabled:opacity-50">
-                        {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-                        {deleting ? 'Deleting...' : `Delete ${selectedFiles.size} files`}
-                      </button>
-                    )}
-                    {allFiles.length > 0 && (
-                      <button onClick={() => { if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set()); else setSelectedFiles(new Set(allFiles.map(f => f.fullPath))) }}
-                        className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
-                          selectedFiles.size === allFiles.length && allFiles.length > 0
-                            ? 'bg-teal-500 text-white'
-                            : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-teal-50'
-                        }`}>
-                        {selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'Deselect All' : 'Select All'}
-                      </button>
-                    )}
-                  </div>
                 </div>
               </div>
 
-              {/* Ward/Trip cards per date */}
+              {/* Action bar */}
+              {selectedYearMonth && allFiles.length > 0 && (
+                <div className="px-4 py-1.5 border-b border-slate-100 bg-white flex items-center gap-2">
+                  <span className="text-[10px] text-slate-400 font-medium">{allFiles.length} files</span>
+                  {selectedFiles.size > 0 && (
+                    <button onClick={handleDeleteSelected} disabled={deleting}
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer bg-red-500 text-white hover:bg-red-600 shadow-sm disabled:opacity-50">
+                      {deleting ? <Loader2 size={12} className="animate-spin" /> : <Trash2 size={12} />}
+                      {deleting ? 'Deleting...' : `Delete ${selectedFiles.size} files`}
+                    </button>
+                  )}
+                  <div className="ml-auto">
+                    <button onClick={() => { if (selectedFiles.size === allFiles.length) setSelectedFiles(new Set()); else setSelectedFiles(new Set(allFiles)) }}
+                      className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold transition-all cursor-pointer ${
+                        selectedFiles.size === allFiles.length && allFiles.length > 0
+                          ? 'bg-teal-500 text-white'
+                          : 'bg-slate-50 text-slate-500 border border-slate-200 hover:bg-teal-50'
+                      }`}>
+                      {selectedFiles.size === allFiles.length && allFiles.length > 0 ? 'Deselect All' : 'Select All'}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Date list */}
               <div className="flex-1 overflow-y-auto p-4 bg-slate-50/30">
-                {(() => {
-                  const monthData = scanResult.months?.[selectedYearMonth]
-                  if (!monthData?.dates) return <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No dates found</div>
-
-                  const datesToShow = selectedDate
-                    ? [[selectedDate, monthData.dates[selectedDate]]].filter(([, d]) => d)
-                    : Object.entries(monthData.dates).sort(([a], [b]) => a.localeCompare(b))
-
-                  if (datesToShow.length === 0) return <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No data for this date</div>
-
-                  return datesToShow.map(([date, dateData]) => {
-                    const dateFiles = Object.values(dateData.wards || {}).flatMap(w => Object.values(w.trips || {}).flat())
-                    const allDateChecked = dateFiles.length > 0 && dateFiles.every(f => selectedFiles.has(f.fullPath))
-                    return (
-                    <div key={date} className="mb-5 last:mb-0">
-                      {/* Date header */}
-                      <div className="flex items-center gap-2 mb-2.5 px-1">
-                        <Calendar size={13} className="text-teal-400" />
-                        <span className="text-[12px] font-bold text-slate-700">{date}</span>
-                        <div className="ml-auto flex items-center gap-2">
-                          <input type="checkbox" className="w-3.5 h-3.5 rounded accent-teal-500 cursor-pointer"
-                            checked={allDateChecked}
-                            onChange={() => {
-                              setSelectedFiles(prev => {
-                                const next = new Set(prev)
-                                dateFiles.forEach(f => { if (allDateChecked) next.delete(f.fullPath); else next.add(f.fullPath) })
-                                return next
-                              })
-                            }} />
+                {!selectedYearMonth ? (
+                  <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">Select a month above</div>
+                ) : dateList.length === 0 ? (
+                  <div className="flex items-center justify-center h-32 text-slate-400 text-[11px]">No dates found</div>
+                ) : (
+                  <div className="grid grid-cols-5 sm:grid-cols-6 md:grid-cols-8 gap-2">
+                    {dateList.map(([date, files]) => {
+                      const allChecked = files.length > 0 && files.every(f => selectedFiles.has(f))
+                      const someChecked = files.some(f => selectedFiles.has(f))
+                      return (
+                        <div key={date}
+                          onClick={() => {
+                            setSelectedFiles(prev => {
+                              const next = new Set(prev)
+                              if (allChecked) files.forEach(f => next.delete(f))
+                              else files.forEach(f => next.add(f))
+                              return next
+                            })
+                          }}
+                          className={`rounded-xl border p-3 text-center transition-all cursor-pointer ${
+                            allChecked
+                              ? 'border-teal-400 bg-teal-50 shadow-sm'
+                              : someChecked
+                                ? 'border-teal-200 bg-teal-50/30 hover:shadow-sm'
+                                : 'border-slate-200 bg-white hover:shadow-sm'
+                          }`}>
+                          <Calendar size={14} className={`mx-auto mb-1 ${allChecked ? 'text-teal-500' : 'text-teal-400'}`} />
+                          <span className="text-[10px] font-bold text-slate-700 block">{date.split('-').slice(1).join('-')}</span>
+                          <span className={`text-[8px] font-semibold ${allChecked ? 'text-teal-500' : 'text-slate-400'}`}>{files.length} files</span>
                         </div>
-                      </div>
-
-                      {/* Compact ward rows */}
-                      <div className="rounded-xl border border-slate-200/80 bg-white overflow-hidden divide-y divide-slate-100">
-                        {Object.entries(dateData.wards || {}).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true })).map(([ward, wardData]) => {
-                          const wardFiles = Object.values(wardData.trips || {}).flat()
-                          const allWardChecked = wardFiles.length > 0 && wardFiles.every(f => selectedFiles.has(f.fullPath))
-                          const tripCount = Object.keys(wardData.trips || {}).length
-
-                          return (
-                            <div key={ward} className={`flex items-center gap-3 px-3 py-2 transition-colors ${allWardChecked ? 'bg-teal-50/50' : 'hover:bg-slate-50/50'}`}>
-                              <input type="checkbox" className="w-3.5 h-3.5 rounded accent-teal-500 cursor-pointer shrink-0"
-                                checked={allWardChecked}
-                                onChange={(e) => {
-                                  setSelectedFiles(prev => {
-                                    const next = new Set(prev)
-                                    wardFiles.forEach(f => { if (e.target.checked) next.add(f.fullPath); else next.delete(f.fullPath) })
-                                    return next
-                                  })
-                                }} />
-                              <div className="flex items-center gap-1.5 w-[90px] shrink-0">
-                                <Route size={10} className="text-teal-400" />
-                                <span className="text-[11px] font-bold text-slate-700 truncate">{ward}</span>
-                              </div>
-                              <div className="flex items-center gap-1.5 flex-1 min-w-0">
-                                {Object.entries(wardData.trips || {}).sort(([a], [b]) => a.localeCompare(b, undefined, { numeric: true })).map(([trip, files]) => (
-                                  <span key={trip} className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-[9px] font-medium text-slate-500">
-                                    <FileImage size={9} className="text-teal-400/70" />
-                                    T{trip}: {files.length}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    </div>
-                  )})
-                })()}
+                      )
+                    })}
+                  </div>
+                )}
               </div>
             </>
           )}

@@ -864,72 +864,114 @@ async function listAllFilesByPrefix(bucket, prefix, onPage) {
   return allItems
 }
 
-/** Scan a single year+month via REST API — structure: {city}/WardTrips/{year}/{month}/{date}/{ward}/{trip}/{images} */
+/** Scan a single year+month via REST API — collect unique wards
+ *  Structure: {city}/WardTrips/{year}/{month}/{date}/{ward}/{trip}/{images} */
 export async function scanWardTripsMonth(cityPath, year, month, onProgress) {
   ensureStorage()
   const bucket = firebaseConfig.storageBucket
   const prefix = `${cityPath}/WardTrips/${year}/${month}/`
-  const monthKey = `${year}/${month}`
 
   const progress = { phase: 'listing', filesFound: 0 }
   const emit = (updates) => { Object.assign(progress, updates); onProgress?.({ ...progress }) }
 
-  // 1. Fetch ALL files under this month prefix in ~4-5 paginated calls
+  // 1. REST API: get ALL files under this month
   emit({ phase: 'listing' })
   const allFiles = await listAllFilesByPrefix(bucket, prefix, (count) => {
     emit({ filesFound: count })
   })
-  emit({ phase: 'building', filesFound: allFiles.length })
 
-  // 2. Parse paths and build hierarchical structure
-  // Path format: {city}/WardTrips/{year}/{month}/{date}/{ward}/{trip}/{filename}
-  const baseParts = prefix.split('/').filter(Boolean).length // number of parts before {date}
-  const monthData = { scannedAt: new Date().toISOString(), totalFiles: 0, dates: {} }
+  // 2. Parse paths — build ward → year → month → date → files structure
+  // Path: {city}/WardTrips/{year}/{month}/{date}/{ward}/{trip}/{filename}
+  const baseParts = prefix.split('/').filter(Boolean).length
+  const wardsMap = {}
 
   for (const file of allFiles) {
     const parts = file.fullPath.split('/')
-    if (parts.length < baseParts + 3) continue // need at least date/ward/trip/file
+    if (parts.length < baseParts + 3) continue
+    const date = parts[baseParts]       // e.g. "2025-08-01"
+    const ward = parts[baseParts + 1]   // e.g. "21-R1"
 
-    const date = parts[baseParts]      // e.g. "2025-08-01"
-    const ward = parts[baseParts + 1]  // e.g. "21-R1"
-    const trip = parts[baseParts + 2]  // e.g. "1"
-
-    if (!monthData.dates[date]) monthData.dates[date] = { totalFiles: 0, wards: {} }
-    const dateData = monthData.dates[date]
-
-    if (!dateData.wards[ward]) dateData.wards[ward] = { totalFiles: 0, trips: {} }
-    const wardData = dateData.wards[ward]
-
-    if (!wardData.trips[trip]) wardData.trips[trip] = []
-    wardData.trips[trip].push({ fullPath: file.fullPath })
-
-    wardData.totalFiles++
-    dateData.totalFiles++
-    monthData.totalFiles++
+    if (!wardsMap[ward]) wardsMap[ward] = {}
+    if (!wardsMap[ward][year]) wardsMap[ward][year] = {}
+    if (!wardsMap[ward][year][month]) wardsMap[ward][year][month] = {}
+    if (!wardsMap[ward][year][month][date]) wardsMap[ward][year][month][date] = []
+    wardsMap[ward][year][month][date].push(file.fullPath)
   }
 
   emit({ phase: 'saving' })
 
   // 3. Merge into existing scan result
   const existing = await loadWardTripsScanResult(cityPath)
+  const monthKey = `${year}/${month}`
   const scanData = {
     city: cityPath,
-    totalFiles: 0,
-    months: existing?.months || {},
+    scannedAt: new Date().toISOString(),
+    scannedMonths: existing?.scannedMonths || [],
+    wards: (existing?.wards && !Array.isArray(existing.wards)) ? existing.wards : {},
   }
-  scanData.months[monthKey] = monthData
-  scanData.totalFiles = Object.values(scanData.months).reduce((s, m) => s + m.totalFiles, 0)
+
+  // Track scanned month
+  if (!scanData.scannedMonths.includes(monthKey)) {
+    scanData.scannedMonths.push(monthKey)
+    scanData.scannedMonths.sort()
+  }
+
+  for (const [ward, years] of Object.entries(wardsMap)) {
+    if (!scanData.wards[ward]) scanData.wards[ward] = { years: {} }
+    for (const [y, months] of Object.entries(years)) {
+      if (!scanData.wards[ward].years[y]) scanData.wards[ward].years[y] = {}
+      for (const [m, dates] of Object.entries(months)) {
+        if (!scanData.wards[ward].years[y][m]) scanData.wards[ward].years[y][m] = {}
+        for (const [d, files] of Object.entries(dates)) {
+          const existingFiles = scanData.wards[ward].years[y][m][d] || []
+          const mergedSet = new Set([...existingFiles, ...files])
+          scanData.wards[ward].years[y][m][d] = [...mergedSet]
+        }
+      }
+    }
+  }
+
+  // Calculate totalFiles at ward and root level
+  let rootTotal = 0
+  for (const [, wardData] of Object.entries(scanData.wards)) {
+    let wardTotal = 0
+    for (const [, months] of Object.entries(wardData.years || {})) {
+      for (const [, dates] of Object.entries(months)) {
+        for (const [, files] of Object.entries(dates)) {
+          wardTotal += files.length
+        }
+      }
+    }
+    wardData.totalFiles = wardTotal
+    rootTotal += wardTotal
+  }
+  scanData.totalFiles = rootTotal
+
   await saveWardTripsScanResult(cityPath, scanData)
   return scanData
 }
 
-/** Remove a month's scan data */
+/** Remove a month's scan data from wards and scannedMonths */
 export async function resetWardTripsMonth(cityPath, year, month) {
   const existing = await loadWardTripsScanResult(cityPath)
-  if (!existing?.months) return existing
+  if (!existing) return existing
   const monthKey = `${year}/${month}`
-  delete existing.months[monthKey]
-  existing.totalFiles = Object.values(existing.months).reduce((s, m) => s + m.totalFiles, 0)
+
+  // Remove from scannedMonths
+  existing.scannedMonths = (existing.scannedMonths || []).filter(m => m !== monthKey)
+
+  // Remove this month's dates from all wards
+  for (const [ward, wardData] of Object.entries(existing.wards || {})) {
+    if (wardData.years?.[year]?.[month]) {
+      delete wardData.years[year][month]
+      // If year empty, remove it
+      if (Object.keys(wardData.years[year]).length === 0) delete wardData.years[year]
+      // If ward has no years, remove it
+      if (Object.keys(wardData.years).length === 0) delete existing.wards[ward]
+    }
+  }
+
+  existing.scannedAt = new Date().toISOString()
   await saveWardTripsScanResult(cityPath, existing)
   return existing
 }
