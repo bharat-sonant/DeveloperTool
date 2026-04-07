@@ -19,6 +19,10 @@ export default function WardTripsSection() {
   const [selectedYearMonth, setSelectedYearMonth] = useState(null)
   const [selectedFiles, setSelectedFiles] = useState(new Set())
   const [deleting, setDeleting] = useState(false)
+  const [autoDeleteRunning, setAutoDeleteRunning] = useState(false)
+  const [autoDeleteStopping, setAutoDeleteStopping] = useState(false)
+  const [autoDeleteProgress, setAutoDeleteProgress] = useState(null)
+  const stopAutoDeleteRef = useRef(false)
 
   const [showCityDrawer, setShowCityDrawer] = useState(false)
   const [showAvailableCities, setShowAvailableCities] = useState(false)
@@ -237,6 +241,114 @@ export default function WardTripsSection() {
 
   // All files for current view (selected ward + year/month)
   const allFiles = dateList.flatMap(([, files]) => files)
+
+  // Auto-delete all data for current city — sequential month by month
+  const handleDeleteAll = async () => {
+    if (!scanResult || !selectedCity) return
+    const totalFiles = scanResult.totalFiles || 0
+    if (totalFiles === 0) return
+    if (!window.confirm(`Delete ALL ${totalFiles.toLocaleString()} files from ${selectedCity}? This cannot be undone.`)) return
+
+    setAutoDeleteRunning(true)
+    setAutoDeleteStopping(false)
+    stopAutoDeleteRef.current = false
+
+    let working = JSON.parse(JSON.stringify(scanResult))
+    let deletedSoFar = 0
+    let failedSoFar = 0
+
+    const wards = Object.keys(working.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+    const totalWards = wards.length
+    let wardIdx = 0
+
+    outer: for (const ward of wards) {
+      wardIdx++
+      const wardData = working.wards[ward]
+      if (!wardData?.years) continue
+
+      const years = Object.keys(wardData.years).sort()
+      for (const year of years) {
+        const months = Object.keys(wardData.years[year] || {})
+        for (const month of months) {
+          if (stopAutoDeleteRef.current) break outer
+
+          const dates = wardData.years[year][month] || {}
+          const filesToDelete = Object.values(dates).flat()
+          if (filesToDelete.length === 0) continue
+
+          setAutoDeleteProgress({
+            ward, year, month, wardIdx, totalWards,
+            deleted: deletedSoFar, failed: failedSoFar,
+            currentBatch: filesToDelete.length,
+          })
+
+          try {
+            const { deleted, failed } = await deleteStorageFiles(filesToDelete)
+            deletedSoFar += deleted
+            failedSoFar += failed.length
+            const failedSet = new Set(failed)
+
+            // Remove deleted file paths from current month's dates
+            for (const [date, files] of Object.entries(dates)) {
+              dates[date] = files.filter(f => failedSet.has(f))
+              if (dates[date].length === 0) delete dates[date]
+            }
+            // Cleanup empty parents
+            if (Object.keys(dates).length === 0) delete wardData.years[year][month]
+            if (Object.keys(wardData.years[year] || {}).length === 0) delete wardData.years[year]
+
+            // Recalculate totals + persist
+            let rootTotal = 0
+            for (const [, wd] of Object.entries(working.wards || {})) {
+              let wt = 0
+              for (const [, ms] of Object.entries(wd.years || {})) {
+                for (const [, ds] of Object.entries(ms)) {
+                  for (const [, fs] of Object.entries(ds)) wt += fs.length
+                }
+              }
+              wd.totalFiles = wt
+              rootTotal += wt
+            }
+            working.totalFiles = rootTotal
+
+            setScanResult({ ...working })
+            if (selectedCity === drawerSelectedCity) setDrawerScanData({ ...working })
+            await saveWardTripsScanResult(selectedCity, working).catch(() => {})
+          } catch (err) {
+            console.error('Auto delete failed for', ward, year, month, err)
+            failedSoFar += filesToDelete.length
+          }
+        }
+      }
+
+      // After ward fully processed, drop it if empty
+      if (working.wards[ward] && Object.keys(working.wards[ward].years || {}).length === 0) {
+        delete working.wards[ward]
+        await saveWardTripsScanResult(selectedCity, working).catch(() => {})
+        setScanResult({ ...working })
+        if (selectedCity === drawerSelectedCity) setDrawerScanData({ ...working })
+      }
+    }
+
+    setAutoDeleteProgress({
+      ward: '', year: '', month: '', wardIdx: totalWards, totalWards,
+      deleted: deletedSoFar, failed: failedSoFar, currentBatch: 0, done: true,
+    })
+    setAutoDeleteRunning(false)
+    setAutoDeleteStopping(false)
+    stopAutoDeleteRef.current = false
+
+    // Reset selection state since data may have shifted
+    setSelectedFiles(new Set())
+    const remainingWard = Object.keys(working.wards || {}).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))[0]
+    setSelectedWard(remainingWard || null)
+    setSelectedYearMonth(remainingWard ? getFirstYearMonth(working, remainingWard) : null)
+  }
+
+  const stopAutoDelete = () => {
+    stopAutoDeleteRef.current = true
+    setAutoDeleteStopping(true)
+  }
 
   // Delete selected files
   const handleDeleteSelected = async () => {
@@ -689,15 +801,63 @@ export default function WardTripsSection() {
           ))}
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {scanResult?.scannedAt && (
+          {scanResult?.scannedAt && !autoDeleteRunning && (
             <span className="text-[9px] text-slate-400">{timeAgo(scanResult.scannedAt)}</span>
           )}
-          <button onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-slate-50 text-slate-600 border border-slate-200 hover:bg-teal-50 hover:text-teal-600 hover:border-teal-200">
+          {autoDeleteRunning ? (
+            autoDeleteStopping ? (
+              <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-amber-50 text-amber-600 border border-amber-200">
+                <Loader2 size={12} className="animate-spin" /> Stopping...
+              </span>
+            ) : (
+              <button onClick={stopAutoDelete}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-red-500 text-white hover:bg-red-600 shadow-sm cursor-pointer">
+                <X size={12} /> Stop
+              </button>
+            )
+          ) : (
+            scanResult?.totalFiles > 0 && (
+              <button onClick={handleDeleteAll} disabled={deleting}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-red-500 text-white hover:bg-red-600 shadow-sm disabled:opacity-50">
+                <Trash2 size={12} /> Delete All Data
+              </button>
+            )
+          )}
+          <button
+            disabled={autoDeleteRunning}
+            onClick={() => { setShowCityDrawer(true); if (!drawerSelectedCity && includedCities.length > 0) setDrawerSelectedCity(includedCities[0]) }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all cursor-pointer bg-slate-50 text-slate-600 border border-slate-200 hover:bg-teal-50 hover:text-teal-600 hover:border-teal-200 disabled:opacity-40 disabled:cursor-not-allowed">
             <Settings2 size={12} /> City Setting
           </button>
         </div>
       </div>
+
+      {/* Auto delete progress bar */}
+      {autoDeleteRunning && autoDeleteProgress && (
+        <div className="px-4 py-2 bg-amber-50/60 border-b border-amber-200 flex items-center gap-3">
+          <Loader2 size={13} className="animate-spin text-amber-500 shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2 text-[10px] font-semibold text-amber-700">
+              <span>Ward {autoDeleteProgress.wardIdx}/{autoDeleteProgress.totalWards}</span>
+              {autoDeleteProgress.ward && (
+                <>
+                  <span className="text-amber-400">·</span>
+                  <span>{autoDeleteProgress.ward}</span>
+                  <span className="text-amber-400">·</span>
+                  <span>{autoDeleteProgress.month} {autoDeleteProgress.year}</span>
+                </>
+              )}
+            </div>
+            <div className="h-1 bg-amber-100 rounded-full mt-1 overflow-hidden">
+              <div className="h-full bg-amber-500 transition-all" style={{ width: `${(autoDeleteProgress.wardIdx / Math.max(autoDeleteProgress.totalWards, 1)) * 100}%` }} />
+            </div>
+          </div>
+          <div className="text-[10px] font-bold text-amber-600 shrink-0">
+            {autoDeleteProgress.deleted.toLocaleString()} deleted
+            {autoDeleteProgress.failed > 0 && <span className="text-red-500 ml-2">{autoDeleteProgress.failed} failed</span>}
+          </div>
+        </div>
+      )}
 
       {/* Content area */}
       {noCity ? (
