@@ -18,17 +18,17 @@ import DutyOnOffSection from '../components/storage/DutyOnOffSection'
 import GenericSection from '../components/storage/GenericSection'
 
 const MENU_ITEMS = [
-  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement' },
-  { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '' },
-  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData' },
-  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages' },
-  { key: 'wardTrips', label: 'Ward Trips', icon: Route,         path: 'WardTrips' },
+  { key: 'attendance', label: 'Attendance', icon: ClipboardList, path: 'AttendanceManagement', disabled: true },
+  { key: 'dutyOnOff', label: 'Duty On/Off', icon: ArrowLeftRight, path: '', disabled: true },
+  { key: 'skipLine',  label: 'Skip Line',  icon: SkipForward,   path: 'SkipData', disabled: true },
+  { key: 'logBook',   label: 'LogBook',    icon: BookOpen,      path: 'LogBookImages', disabled: true },
+  { key: 'wardTrips', label: 'Ward Trips', icon: Route,         path: 'WardTrips', disabled: true },
   { key: 'iec',       label: 'IEC',        icon: Megaphone,     path: 'IECData', disabled: true },
   { key: 'field',     label: 'Field',      icon: MapPin,        path: 'FieldExecutiveData', disabled: true },
 ]
 
 export default function StorageBrowser() {
-  const [activeMenu, setActiveMenu] = useState('dutyOnOff')
+  const [activeMenu, setActiveMenu] = useState(null)
   const activeItem = MENU_ITEMS.find(m => m.key === activeMenu)
 
   return (
